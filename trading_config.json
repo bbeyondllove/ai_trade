@@ -1,0 +1,39 @@
+{
+  "risk": {
+    "max_daily_loss": 0.05,
+    "max_position_size": 0.8,
+    "max_leverage": 10,
+    "min_trade_size_usd": 10,
+    "consecutive_loss_limit": 3,
+    "max_risk_per_trade": 0.02,
+    "emergency_stop_loss": 0.15
+  },
+  "trading": {
+    "fee_rate": 0.001,
+    "retry_attempts": 3,
+    "order_timeout_seconds": 30,
+    "slippage_tolerance": 0.001,
+    "max_orders_per_second": 5,
+    "enable_paper_trading": true
+  },
+  "performance": {
+    "target_sharpe_ratio": 1.5,
+    "max_drawdown": 0.15,
+    "enable_circuit_breaker": true,
+    "performance_window_days": 30,
+    "min_trades_for_analysis": 10
+  },
+  "cache": {
+    "price_cache_ttl": 30,
+    "indicators_cache_ttl": 600,
+    "max_cache_size": 1000,
+    "enable_persistence": false
+  },
+  "logging": {
+    "level": "INFO",
+    "enable_file_logging": true,
+    "max_log_file_size_mb": 50,
+    "backup_log_count": 5,
+    "enable_performance_logging": true
+  }
+}
