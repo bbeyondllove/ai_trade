@@ -8,7 +8,7 @@ import time
 import logging
 import warnings
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from urllib3.util.retry import Retry
@@ -54,24 +54,26 @@ class AsyncMarketDataFetcher:
         self.binance_base_url = "https://api.binance.com/api/v3"
         self.coingecko_base_url = "https://api.coingecko.com/api/v3"
 
-        # 币种映射
-        self.binance_symbols = {
-            'BTC': 'BTCUSDT',
-            'ETH': 'ETHUSDT',
-            'SOL': 'SOLUSDT',
-            'BNB': 'BNBUSDT',
-            'XRP': 'XRPUSDT',
-            'DOGE': 'DOGEUSDT'
-        }
-
-        self.coingecko_mapping = {
-            'BTC': 'bitcoin',
-            'ETH': 'ethereum',
-            'SOL': 'solana',
-            'BNB': 'binancecoin',
-            'XRP': 'ripple',
-            'DOGE': 'dogecoin'
-        }
+        # 获取配置中的币种列表
+        from config_manager import get_config
+        config = get_config()
+        
+        # 检查是否有配置的币种列表
+        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
+            raise ValueError("No monitored coins configured in risk manager")
+        
+        coins = config.risk.monitored_coins
+        
+        # 动态生成币种映射，统一使用大写
+        self.binance_symbols = {}
+        self.coingecko_mapping = {}
+        
+        for coin in coins:
+            # Binance映射：币种+USDT
+            self.binance_symbols[coin] = f"{coin}USDT"
+            
+            # CoinGecko映射：使用币种代码作为ID（保持大写）
+            self.coingecko_mapping[coin] = coin
 
         # 缓存系统
         self._price_cache: Dict[str, Dict] = {}
@@ -446,8 +448,8 @@ class AsyncMarketDataFetcher:
 
     def _calculate_ema(self, prices: List[float], period: int) -> float:
         """计算EMA"""
-        if len(prices) < period:
-            return sum(prices) / len(prices)
+        if len(prices) < period or period <= 0:
+            return sum(prices) / len(prices) if prices else 0
 
         multiplier = 2 / (period + 1)
         ema = prices[0]
@@ -459,7 +461,7 @@ class AsyncMarketDataFetcher:
 
     def _calculate_rsi(self, prices: List[float], period: int = 14) -> float:
         """计算RSI"""
-        if len(prices) < period + 1:
+        if len(prices) < period + 1 or period <= 0:
             return 50.0
 
         gains = []
@@ -474,8 +476,13 @@ class AsyncMarketDataFetcher:
                 gains.append(0)
                 losses.append(abs(change))
 
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
+        # 防止除零错误
+        if period > 0:
+            avg_gain = sum(gains[-period:]) / period
+            avg_loss = sum(losses[-period:]) / period
+        else:
+            avg_gain = 0
+            avg_loss = 1  # 避免除零
 
         if avg_loss == 0:
             return 100.0
@@ -700,3 +707,103 @@ async_market_fetcher = AsyncMarketDataFetcher()
 def get_async_market_fetcher() -> AsyncMarketDataFetcher:
     """获取全局异步市场数据获取器实例"""
     return async_market_fetcher
+
+
+# 在文件末尾添加通用精度处理函数
+def get_quantity_precision(coin: str, price: Optional[float] = None) -> int:
+    """
+    根据价格动态调整数量精度
+    
+    Args:
+        coin: 币种符号
+        price: 当前价格，如果为None则使用默认精度
+        
+    Returns:
+        int: 精度位数
+    """
+    # 如果没有提供价格，尝试获取当前价格
+    if price is None:
+        try:
+            # 使用全局market_fetcher实例
+            from async_market_data import async_market_fetcher
+            price_data = async_market_fetcher.get_current_prices_batch([coin])
+            price = price_data.get(coin, {}).get('price', 0)
+        except:
+            # 如果无法获取价格，使用默认值
+            price = 0
+    
+    # 确保price是float类型
+    if price is None:
+        price = 0
+    
+    # 根据价格动态调整精度
+    if price > 10000:
+        return 6  # 高精度
+    elif price > 1000:
+        return 4  # 中高精度
+    elif price > 100:
+        return 2  # 中等精度
+    elif price > 1:
+        return 2  # 标准精度
+    elif price > 0:
+        return 4  # 低价格使用4位小数精度
+    else:
+        return 2  # 默认精度
+
+
+def adjust_quantity_precision(quantity: float, coin: str, price: Optional[float] = None) -> float:
+    """
+    根据价格动态调整数量精度
+    
+    Args:
+        quantity: 数量
+        coin: 币种符号
+        price: 当前价格，如果为None则使用默认精度
+        
+    Returns:
+        float: 调整后的数量
+    """
+    precision = get_quantity_precision(coin, price)
+    return round(quantity, precision)
+
+
+def adjust_order_quantity(quantity: float, coin: str, price: Optional[float] = None) -> float:
+    """
+    根据价格调整订单数量（整数或特定精度）
+    
+    Args:
+        quantity: 数量
+        coin: 币种符号
+        price: 当前价格，如果为None则使用默认精度
+        
+    Returns:
+        float: 调整后的订单数量
+    """
+    # 如果没有提供价格，尝试获取当前价格
+    if price is None:
+        try:
+            # 使用全局market_fetcher实例
+            from async_market_data import async_market_fetcher
+            price_data = async_market_fetcher.get_current_prices_batch([coin])
+            price = price_data.get(coin, {}).get('price', 0)
+        except:
+            # 如果无法获取价格，使用默认值
+            price = 0
+    
+    # 确保price是float类型
+    if price is None:
+        price = 0
+    
+    # 根据价格调整订单数量
+    if price > 0 and price < 1:
+        # 价格在0到1之间时，数量使用整数
+        return round(quantity, 0)
+    elif price >= 1 and price < 100:
+        # 价格在1到100之间时，使用2位小数
+        return round(quantity, 2)
+    elif price >= 100:
+        # 价格大于等于100时，使用4位小数
+        return round(quantity, 4)
+    else:
+        # 其他情况使用2位小数
+        return round(quantity, 2)

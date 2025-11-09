@@ -204,7 +204,7 @@ class Database:
         conn.commit()
         conn.close()
     
-    def get_portfolio(self, model_id: int, current_prices: Dict = None) -> Dict:
+    def get_portfolio(self, model_id: int, current_prices: Optional[Dict] = None) -> Dict:
         """Get portfolio with positions and P&L
 
         Args:
@@ -233,6 +233,15 @@ class Database:
 
         initial_capital = model_result['initial_capital']
         is_live = bool(model_result['is_live'])
+
+        # 初始化变量
+        cash = 0
+        positions = []
+        positions_value = 0
+        margin_used = 0
+        total_value = initial_capital
+        realized_pnl = 0
+        unrealized_pnl = 0
 
         # 如果是实盘模式，需要特殊处理持仓隔离
         if is_live:
@@ -280,11 +289,23 @@ class Database:
                     # 使用实盘余额数据
                     usdt_balance = live_balance_result.get('USDT', {})
                     cash = usdt_balance.get('free', 0)
-
-                    # 计算总价值（现金 + 持仓价值）
-                    positions_value = sum([p['quantity'] * p['avg_price'] for p in positions])
+                    
+                    # 计算持仓的当前价值（使用当前价格）
+                    current_positions_value = 0
+                    if current_prices:
+                        for p in positions:
+                            coin = p['coin']
+                            if coin in current_prices:
+                                current_positions_value += p['quantity'] * current_prices[coin]
+                    
+                    # 总价值 = 现金 + 持仓当前价值
+                    total_value = cash + current_positions_value
+                    
+                    # 计算保证金使用情况
                     margin_used = sum([p['quantity'] * p['avg_price'] / p['leverage'] for p in positions])
-                    total_value = cash + positions_value
+                    
+                    # 持仓价值按开仓价计算（用于显示）
+                    positions_value = sum([p['quantity'] * p['avg_price'] for p in positions])
 
                     # 从数据库获取已实现盈亏
                     cursor.execute('''
@@ -400,7 +421,7 @@ class Database:
     # ============ Trade Records ============
     
     def add_trade(self, model_id: int, coin: str, signal: str, quantity: float,
-              price: float, leverage: int = 1, side: str = 'long', pnl: float = 0, fee: float = 0, order_id: str = None, message: str = None):
+              price: float, leverage: int = 1, side: str = 'long', pnl: float = 0, fee: float = 0, order_id: Optional[str] = None, message: Optional[str] = None):
         """Add trade record with fee and optional order_id/message"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -614,23 +635,15 @@ class Database:
 
     # ============ Provider Management ============
 
-    def add_provider(self, name: str, api_url: str, api_key: str, models: str = '') -> int:
+    def add_provider(self, name: str, api_url: str, api_key: str, models: str) -> int:
         """Add new API provider"""
         conn = self.get_connection()
         cursor = conn.cursor()
-
-        # 自动检测 provider_type
-        provider_type = 'openai'  # 默认值
-        api_url_lower = api_url.lower()
-        if 'openai.com' in api_url_lower or 'api.openai.com' in api_url_lower:
-            provider_type = 'openai'
-        elif 'anthropic.com' in api_url_lower or 'api.anthropic.com' in api_url_lower:
-            provider_type = 'anthropic'
-        elif 'deepseek.com' in api_url_lower or 'api.deepseek.com' in api_url_lower:
+        # Determine provider type from URL for better auto-detection
+        provider_type = 'openai'  # default
+        if 'deepseek' in api_url.lower():
             provider_type = 'deepseek'
-        elif 'googleapis.com' in api_url_lower or 'generativelanguage.googleapis.com' in api_url_lower:
-            provider_type = 'gemini'
-        elif 'azure.com' in api_url_lower:
+        elif 'azure' in api_url.lower():
             provider_type = 'azure_openai'
 
         cursor.execute('''
@@ -640,7 +653,7 @@ class Database:
         provider_id = cursor.lastrowid
         conn.commit()
         conn.close()
-        return provider_id
+        return provider_id if provider_id is not None else 0
 
     def get_provider(self, provider_id: int) -> Optional[Dict]:
         """Get provider information"""
@@ -693,7 +706,7 @@ class Database:
         model_id = cursor.lastrowid
         conn.commit()
         conn.close()
-        return model_id
+        return model_id if model_id is not None else 0
 
     def get_model(self, model_id: int) -> Optional[Dict]:
         """Get model information"""

@@ -73,27 +73,27 @@ class EnhancedTradingEngine:
 
     def execute_trading_cycle(self) -> Dict:
         """执行交易周期"""
+        cycle_id = f"{self.model_id}_{int(time.time())}"
         cycle_start_time = time.time()
-        cycle_id = f"{self.model_id}_{int(cycle_start_time)}"
-
+        self.logger.info(f"[{cycle_id}] Starting trading cycle at {cycle_start_time}")
+        
         try:
-            self.logger.info(f"[{cycle_id}] Starting trading cycle")
-
-            # 并行获取市场数据
+            # 获取市场状态和投资组合
             market_state = self._get_market_state_optimized()
-
+            portfolio = self.db.get_portfolio(self.model_id)
+            
+            self.logger.debug(f"[{cycle_id}] Market state keys: {list(market_state.keys()) if market_state else 'None'}")
+            self.logger.debug(f"[{cycle_id}] Portfolio keys: {list(portfolio.keys()) if portfolio else 'None'}")
+            
+            # 检查必要数据
             if not market_state:
-                self.logger.warning(f"[{cycle_id}] No market data available")
-                return self._create_error_result("No market data", cycle_start_time)
-
-            current_prices = {coin: data['price'] for coin, data in market_state.items()}
-
-            # 获取投资组合
-            portfolio = self.db.get_portfolio(self.model_id, current_prices)
-            if 'error' in portfolio:
-                self.logger.error(f"[{cycle_id}] Portfolio error: {portfolio['error']}")
-                return self._create_error_result(portfolio['error'], cycle_start_time)
-
+                self.logger.error(f"[{cycle_id}] Failed to get market state")
+                return {'success': False, 'error': 'Failed to get market state'}
+                
+            if not portfolio:
+                self.logger.error(f"[{cycle_id}] Failed to get portfolio")
+                return {'success': False, 'error': 'Failed to get portfolio'}
+                
             # 预交易风险检查
             risk_check = self.risk_manager.pre_trade_check(portfolio, market_state)
             if not risk_check['approved']:
@@ -113,6 +113,7 @@ class EnhancedTradingEngine:
             execution_results = self._execute_decisions_optimized(processed_decisions, market_state, portfolio, cycle_id)
 
             # 更新投资组合和记录
+            current_prices = {coin: data['price'] for coin, data in market_state.items()}
             updated_portfolio = self._update_portfolio_and_records(portfolio, current_prices, cycle_id)
 
             cycle_time = time.time() - cycle_start_time
@@ -133,14 +134,29 @@ class EnhancedTradingEngine:
                 'risk_metrics': risk_check
             }
 
+        except ZeroDivisionError as e:
+            cycle_time = time.time() - cycle_start_time
+            error_msg = f"Trading cycle failed: float division by zero - {str(e)}"
+            self.logger.error(f"[{cycle_id}] {error_msg}")
+            self.logger.error(f"[{cycle_id}] Division by zero at line {e.__traceback__.tb_lineno if e.__traceback__ else 'unknown'}")
+            
+            # 记录错误
+            self.performance_monitor.record_error('cycle_error', error_msg, self.model_id)
+            
+            return {
+                'success': False,
+                'cycle_id': cycle_id,
+                'cycle_time': cycle_time,
+                'error': error_msg
+            }
         except Exception as e:
             cycle_time = time.time() - cycle_start_time
             error_msg = f"Trading cycle failed: {str(e)}"
             self.logger.error(f"[{cycle_id}] {error_msg}")
-
+            
             # 记录错误
             self.performance_monitor.record_error('cycle_error', error_msg, self.model_id)
-
+            
             return {
                 'success': False,
                 'cycle_id': cycle_id,
@@ -158,10 +174,12 @@ class EnhancedTradingEngine:
                 return self._price_cache[cache_key]
 
             # 获取价格数据
-            coins = self.risk_manager.coins if hasattr(self.risk_manager, 'coins') else ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
+            if not hasattr(self.risk_manager, 'coins') or not self.risk_manager.coins:
+                self.logger.error("No monitored coins configured in risk manager")
+                return {}
+            coins = self.risk_manager.coins
             prices = self.market_fetcher.get_current_prices_batch(coins)
 
-  
             # 构建市场状态
             market_state = {}
             for coin, data in prices.items():
@@ -255,21 +273,32 @@ class EnhancedTradingEngine:
     def _process_decisions_with_risk(self, decisions: Dict, portfolio: Dict, market_state: Dict, cycle_id: str) -> Dict:
         """使用风险管理处理决策"""
         processed_decisions = {}
+        
+        self.logger.info(f"[{cycle_id}] 处理决策数量: {len(decisions)}")
 
         for coin, decision_data in decisions.items():
             try:
-                # 创建决策对象
-                trade_decision = TradeDecision(
-                    coin=coin,
-                    signal=decision_data.get('signal', 'hold'),
-                    quantity=decision_data.get('quantity', 0),
-                    leverage=decision_data.get('leverage', 1),
-                    confidence=decision_data.get('confidence', 0),
-                    justification=decision_data.get('justification', ''),
-                    price=market_state.get(coin, {}).get('price', 0),
-                    stop_loss=decision_data.get('stop_loss', 0),
-                    profit_target=decision_data.get('profit_target', 0)
-                )
+                # 兼容TradingDecision对象和字典格式
+                if isinstance(decision_data, dict):
+                    # 处理字典格式
+                    trade_decision = TradeDecision(
+                        coin=coin,
+                        signal=decision_data.get('signal', 'hold'),
+                        quantity=decision_data.get('quantity', 0),
+                        leverage=decision_data.get('leverage', 1),
+                        confidence=decision_data.get('confidence', 0),
+                        justification=decision_data.get('justification', ''),
+                        price=market_state.get(coin, {}).get('price', 0),
+                        stop_loss=decision_data.get('stop_loss', 0),
+                        profit_target=decision_data.get('profit_target', 0)
+                    )
+                else:
+                    # 处理TradingDecision对象格式
+                    trade_decision = decision_data
+                    # 确保价格是最新的
+                    trade_decision.price = market_state.get(coin, {}).get('price', 0)
+                
+                self.logger.info(f"[{cycle_id}] 处理决策 {coin} - 数量: {trade_decision.quantity:.6f}, 价格: ${trade_decision.price:.4f}")
 
                 # 风险验证前记录调试信息
                 self.logger.debug(f"[{cycle_id}] Trade decision for {coin}: "
@@ -291,8 +320,10 @@ class EnhancedTradingEngine:
                                        f"{trade_decision.quantity:.4f} to {risk_metrics.adjusted_quantity:.4f}")
 
                     trade_decision.quantity = risk_metrics.adjusted_quantity
-                    processed_decisions[coin] = decision_data
-                    processed_decisions[coin]['risk_metrics'] = risk_metrics
+                    # 直接使用TradingDecision对象
+                    processed_decisions[coin] = trade_decision
+                    # 添加风险指标到决策对象中
+                    processed_decisions[coin].risk_metrics = risk_metrics
                 else:
                     self.logger.info(f"[{cycle_id}] Trade rejected for {coin}: {risk_metrics.recommendation}")
 
@@ -300,6 +331,7 @@ class EnhancedTradingEngine:
                 self.logger.error(f"[{cycle_id}] Error processing decision for {coin}: {e}")
                 self.performance_monitor.record_error('decision_processing_error', str(e), self.model_id)
 
+        self.logger.info(f"[{cycle_id}] 处理后决策数量: {len(processed_decisions)}")
         return processed_decisions
 
     def _execute_decisions_optimized(self, decisions: Dict, market_state: Dict, portfolio: Dict, cycle_id: str) -> List[Dict]:
@@ -384,7 +416,11 @@ class EnhancedTradingEngine:
         if 'price' not in market_state[coin] or market_state[coin]['price'] <= 0:
             return {'coin': coin, 'success': False, 'error': f'Invalid price for {coin}'}
 
-        signal = decision.get('signal', '').lower()
+        # 获取信号，兼容TradingDecision对象和字典格式
+        if isinstance(decision, dict):
+            signal = decision.get('signal', '').lower()
+        else:
+            signal = decision.signal.lower()
 
         # 检查是否已有相同方向的持仓，进行智能合并
         if signal in ['buy_to_enter', 'sell_to_enter']:
@@ -477,9 +513,15 @@ class EnhancedTradingEngine:
         try:
             # 加仓无需频率限制，技术指标符合即可执行
 
-            current_quantity = decision.get('quantity', 0)
+            # 兼容TradingDecision对象和字典格式
+            if isinstance(decision, dict):
+                current_quantity = decision.get('quantity', 0)
+                leverage = decision.get('leverage', existing_position.get('leverage', 1))
+            else:
+                current_quantity = decision.quantity
+                leverage = decision.leverage
+
             current_price = market_state[coin]['price']
-            leverage = decision.get('leverage', existing_position.get('leverage', 1))
 
             # 计算新的平均价格
             existing_quantity = existing_position['quantity']
@@ -487,7 +529,11 @@ class EnhancedTradingEngine:
 
             total_quantity = existing_quantity + current_quantity
             total_value = (existing_quantity * existing_avg_price) + (current_quantity * current_price)
-            new_avg_price = total_value / total_quantity
+            # 防止除零错误
+            if total_quantity > 0:
+                new_avg_price = total_value / total_quantity
+            else:
+                new_avg_price = current_price  # 如果总数量为0，使用当前价格作为均价
 
             # 检查总仓位大小限制
             total_value_usd = total_quantity * current_price
@@ -496,7 +542,11 @@ class EnhancedTradingEngine:
             if total_value_usd > max_position_value:
                 # 计算可加仓的最大数量
                 available_value = max_position_value - (existing_quantity * existing_avg_price)
-                max_add_quantity = available_value / current_price
+                # 防止除零错误
+                if current_price > 0:
+                    max_add_quantity = available_value / current_price
+                else:
+                    max_add_quantity = 0
 
                 if max_add_quantity <= 0:
                     return {
@@ -510,7 +560,11 @@ class EnhancedTradingEngine:
                 current_quantity = min(current_quantity, max_add_quantity)
                 total_quantity = existing_quantity + current_quantity
                 total_value = (existing_quantity * existing_avg_price) + (current_quantity * current_price)
-                new_avg_price = total_value / total_quantity
+                # 防止除零错误
+                if total_quantity > 0:
+                    new_avg_price = total_value / total_quantity
+                else:
+                    new_avg_price = current_price  # 如果总数量为0，使用当前价格作为均价
 
             self.logger.info(f"[Position Addition] {coin} 加仓: {existing_quantity:.6f}+{current_quantity:.6f}={total_quantity:.6f}, 新均价: ${new_avg_price:.2f}")
 
@@ -594,16 +648,16 @@ class EnhancedTradingEngine:
         # 基础费用
         base_fee = trade_amount * self.fee_rate
 
-        # 某些交易所对特定币种有最低手续费
-        min_fees = {
-            'BTC': 0.00000001,
-            'ETH': 0.000001,
-            'USDT': 0.1,
-            'DOGE': 0.1
-        }
+        # 最低手续费：下单金额的0.05%（5% seems too high, using 0.05% instead）
+        # 但如果计算出的最低手续费小于10美元，则使用10美元作为最低手续费
+        percentage_fee = trade_amount * 0.0005  # 0.05%
+        min_fee = max(percentage_fee, 10.0)  # 至少10美元
+        
+        # 最高不超过20美元
+        min_fee = min(min_fee, 20.0)
 
-        # 计算基础费用
-        trade_fee = max(base_fee, min_fees.get(coin, 0.0001))
+        # 计算基础费用，但不低于最低手续费
+        trade_fee = max(base_fee, min_fee)
 
         # 对于杠杆交易，可能会有额外的费用
         if leverage > 1:
@@ -617,49 +671,36 @@ class EnhancedTradingEngine:
         return round(trade_fee, 6)  # 费用精度到6位小数
 
     def _adjust_order_quantity(self, quantity: float, coin: str) -> float:
-        """根据交易所要求调整订单数量精度"""
-        # 根据OKX交易所的常见要求调整数量精度
-        if coin == 'BTC':
-            # BTC通常要求精度为6位小数
-            return round(quantity, 6)
-        elif coin == 'ETH':
-            # ETH通常要求精度为4位小数，并且是特定值的倍数
-            adjusted = round(quantity, 4)
-            # 确保是0.0001的倍数
-            min_lot = 0.0001
-            return round(adjusted // min_lot * min_lot, 4)
-        elif coin in ['SOL', 'BNB', 'XRP']:
-            # 这些币种通常要求精度为2位小数
-            adjusted = round(quantity, 2)
-            # 确保是0.01的倍数
-            min_lot = 0.01
-            return round(adjusted // min_lot * min_lot, 2)
-        elif coin == 'DOGE':
-            # DOGE通常要求精度为0位小数
-            adjusted = round(quantity, 0)
-            # 确保是1的倍数
-            min_lot = 1
-            return round(adjusted // min_lot * min_lot, 0)
-        else:
-            # 默认使用2位小数精度
-            return round(quantity, 2)
+        """根据交易所要求调整订单数量"""
+        from async_market_data import adjust_order_quantity
+        return adjust_order_quantity(quantity, coin)
 
     def _execute_buy(self, coin: str, decision: Dict, market_state: Dict, portfolio: Dict, cycle_id: str) -> Dict[str, Any]:
         """执行买入交易"""
         try:
-            quantity = float(decision.get('quantity', 0))
-            leverage = int(decision.get('leverage', 1))
+            # 兼容TradingDecision对象和字典格式
+            if isinstance(decision, dict):
+                quantity = float(decision.get('quantity', 0))
+                leverage = int(decision.get('leverage', 1))
+            else:
+                quantity = float(decision.quantity)
+                leverage = int(decision.leverage)
+                
             price = market_state[coin]['price']
 
             # 调整订单数量精度以符合交易所要求
             original_quantity = quantity
             quantity = self._adjust_order_quantity(quantity, coin)
-
+            
+            # 如果调整后数量为0或负数，直接返回错误
             if quantity <= 0:
+                self.logger.warning(f"[{cycle_id}] 无效订单数量 {quantity} for {coin} @ ${price:.4f}")
                 return {'coin': coin, 'success': False, 'error': 'Invalid quantity'}
+                
+            self.logger.info(f"[{cycle_id}] 订单数量调整: {original_quantity:.6f} -> {quantity:.6f} for {coin} @ ${price:.4f}")
 
             # 检查调整后的数量是否与原始数量有显著差异
-            if abs(quantity - original_quantity) / original_quantity > 0.1:  # 差异超过10%
+            if original_quantity > 0 and abs(quantity - original_quantity) / original_quantity > 0.1:  # 差异超过10%
                 self.logger.warning(f"[{cycle_id}] 订单数量调整较大: {original_quantity:.6f} -> {quantity:.6f} for {coin}")
 
             trade_amount = quantity * price
@@ -678,351 +719,261 @@ class EnhancedTradingEngine:
                     self.logger.debug(f"[{cycle_id}] 实时USDT可用余额: ${usdt_balance:.2f}")
 
                     # 计算基于实时余额的最大可交易金额
+                    # 如果杠杆无效，直接返回错误
+                    if leverage <= 0:
+                        return {'coin': coin, 'success': False, 'error': 'Invalid leverage'}
+                        
                     margin_required = trade_amount / leverage
                     total_required = margin_required + trade_fee
 
                     if usdt_balance < total_required:
                         # 基于可用余额重新计算最大可交易数量
+                        # 如果杠杆为0或负数，直接返回错误
+                        if leverage <= 0:
+                            return {'coin': coin, 'success': False, 'error': 'Invalid leverage'}
+                            
                         max_trade_amount = usdt_balance * (leverage - 1) / leverage  # 预留保证金
-                        max_quantity = max_trade_amount / price
-                        max_quantity = self._adjust_order_quantity(max_quantity, coin)
+                        self.logger.debug(f"[{cycle_id}] 可用余额计算: ${usdt_balance:.2f}, 最大交易金额: ${max_trade_amount:.2f}")
 
-                        if max_quantity <= 0:
-                            return {'coin': coin, 'success': False,
-                                   'error': f'Insufficient balance: ${usdt_balance:.2f} < required ${total_required:.2f}'}
+                        # 重新计算数量
+                        quantity = max_trade_amount / price
+                        self.logger.info(f"[{cycle_id}] 重新计算订单数量: {original_quantity:.6f} -> {quantity:.6f} for {coin} @ ${price:.4f}")
 
-                        self.logger.warning(f"[{cycle_id}] 调整数量 {quantity:.6f} -> {max_quantity:.6f} 基于实时余额")
-                        quantity = max_quantity
+                        # 重新计算交易金额和费用
                         trade_amount = quantity * price
-                        trade_fee = trade_amount * self.fee_rate
-                        margin_required = trade_amount / leverage
-                        total_required = margin_required + trade_fee
+                        trade_fee = self._calculate_precise_fees(trade_amount, coin, leverage, 'buy')
 
                 except Exception as e:
                     self.logger.error(f"[{cycle_id}] 获取实时余额失败: {str(e)}")
-                    return {'coin': coin, 'success': False, 'error': f'Balance check failed: {str(e)}'}
-                # 实盘交易逻辑
-                try:
-                    # live_trading_service 已在文件顶部导入
-                    
-                    # 检查实盘服务连接状态
-                    if not live_trading_service.is_connected:
-                        # 尝试重新连接
-                        live_trading_service._check_connection()
-                        if not live_trading_service.is_connected:
-                            return {'coin': coin, 'success': False, 'error': '实盘交易服务未连接'}
+                    return {'coin': coin, 'success': False, 'error': f'获取实时余额失败: {str(e)}'}
 
-                    # 执行实盘买入订单
-                    order_result = live_trading_service.execute_order(
-                        coin=coin,
-                        side='buy',
-                        quantity=quantity,
-                        leverage=leverage,
-                        order_type='market'
-                    )
-
-                    if order_result.get('success'):
-                        # 更新持仓到数据库
-                        self.db.update_position(self.model_id, coin, quantity, price, leverage, 'long')
-
-                        # 记录交易到数据库
-                        order_id = order_result.get('order_id')
-                        filled_size = order_result.get('filled_size')
-                        message = order_result.get('message', f'[LIVE] Long {quantity:.4f} {coin} @ ${price:.2f}')
-                        instrument_id = order_result.get('instrument_id')
-                        
-                        self.db.add_trade(
-                            self.model_id, coin, 'buy_to_enter', quantity,
-                            price, leverage, 'long', pnl=0, fee=trade_fee,
-                            order_id=order_id,
-                            message=message
-                        )
-
-                        return {
-                            'coin': coin,
-                            'signal': 'buy_to_enter',
-                            'success': True,
-                            'quantity': quantity,
-                            'price': price,
-                            'leverage': leverage,
-                            'fee': trade_fee,
-                            'order_id': order_result.get('order_id'),
-                            'filled_size': order_result.get('filled_size'),
-                            'message': order_result.get('message'),
-                            'instrument_id': order_result.get('instrument_id'),
-                            'mode': 'live'
-                        }
-                    else:
-                        return {
-                            'coin': coin, 
-                            'success': False, 
-                            'error': order_result.get('error', '实盘订单执行失败')
-                        }
-                except Exception as e:
-                    self.logger.error(f"[{cycle_id}] 实盘买入执行失败 for {coin}: {str(e)}")
-                    return {'coin': coin, 'success': False, 'error': f'实盘买入执行失败: {str(e)}'}
+            # 执行买入
+            if self.is_live:
+                order_result = live_trading_service.execute_order(coin, 'buy', quantity, leverage)
             else:
-                # 模拟交易
-                margin_required = trade_amount / leverage
-                total_required = margin_required + trade_fee
+                order_result = self.db.buy(coin, quantity, price, leverage)
 
-                if total_required > portfolio['cash']:
-                    return {'coin': coin, 'success': False, 'error': 'Insufficient cash'}
+            if not order_result.get('success'):
+                return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
 
-                self.db.update_position(self.model_id, coin, quantity, price, leverage, 'long')
-                self.db.add_trade(
-                    self.model_id, coin, 'buy_to_enter', quantity,
-                    price, leverage, 'long', pnl=0, fee=trade_fee,
-                    order_id=None, message=f'[SIM] Long {quantity:.4f} {coin} @ ${price:.2f}'
-                )
+            # 更新投资组合
+            self.db.update_position(self.model_id, coin, quantity, price, leverage, 'long')
 
-                return {
-                    'coin': coin,
-                    'signal': 'buy_to_enter',
-                    'success': True,
-                    'quantity': quantity,
-                    'price': price,
-                    'leverage': leverage,
-                    'fee': trade_fee,
-                    'mode': 'simulation'
-                }
+            # 记录交易
+            self.db.add_trade(
+                self.model_id, coin, 'buy_to_enter', quantity,
+                price, leverage, 'long', pnl=0, fee=trade_fee,
+                order_id=order_result.get('order_id'), message=f'买入 {quantity:.6f} {coin} @ ${price:.2f}'
+            )
+
+            return {
+                'coin': coin,
+                'signal': 'buy_to_enter',
+                'success': True,
+                'quantity': quantity,
+                'price': price,
+                'leverage': leverage,
+                'fee': trade_fee,
+                'message': f'成功买入 {quantity:.6f} {coin} @ ${price:.2f}'
+            }
+
         except Exception as e:
-            self.logger.error(f"[{cycle_id}] Buy execution failed for {coin}: {str(e)}")
-            return {'coin': coin, 'success': False, 'error': f'Buy execution failed: {str(e)}'}
+            self.logger.error(f"[{cycle_id}] 买入执行失败 for {coin}: {str(e)}")
+            return {'coin': coin, 'success': False, 'error': f'买入执行失败: {str(e)}'}
 
     def _execute_sell(self, coin: str, decision: Dict, market_state: Dict, portfolio: Dict, cycle_id: str) -> Dict[str, Any]:
-        """执行卖出交易（做空）"""
+        """执行卖出交易"""
         try:
-            quantity = float(decision.get('quantity', 0))
-            leverage = int(decision.get('leverage', 1))
+            # 兼容TradingDecision对象和字典格式
+            if isinstance(decision, dict):
+                quantity = float(decision.get('quantity', 0))
+                leverage = int(decision.get('leverage', 1))
+            else:
+                quantity = float(decision.quantity)
+                leverage = int(decision.leverage)
+                
             price = market_state[coin]['price']
 
             # 调整订单数量精度以符合交易所要求
             original_quantity = quantity
             quantity = self._adjust_order_quantity(quantity, coin)
+            
+            self.logger.info(f"[{cycle_id}] 订单数量调整: {original_quantity:.6f} -> {quantity:.6f} for {coin} @ ${price:.4f}")
 
             if quantity <= 0:
+                self.logger.warning(f"[{cycle_id}] 无效订单数量 {quantity} for {coin} @ ${price:.4f}")
                 return {'coin': coin, 'success': False, 'error': 'Invalid quantity'}
 
             # 检查调整后的数量是否与原始数量有显著差异
-            if abs(quantity - original_quantity) / original_quantity > 0.1:  # 差异超过10%
+            if original_quantity > 0 and abs(quantity - original_quantity) / original_quantity > 0.1:  # 差异超过10%
                 self.logger.warning(f"[{cycle_id}] 订单数量调整较大: {original_quantity:.6f} -> {quantity:.6f} for {coin}")
 
             trade_amount = quantity * price
-            # 使用精确的费用计算（卖出）
+            # 使用精确的费用计算
             trade_fee = self._calculate_precise_fees(trade_amount, coin, leverage, 'sell')
 
             if self.is_live:
-                # 获取实时余额检查
+                # 获取实时余额（而非使用缓存的portfolio）
                 try:
                     balance_result = live_trading_service.get_balance()
                     if not balance_result.get('success'):
                         return {'coin': coin, 'success': False, 'error': f'Failed to get balance: {balance_result.get("error", "")}'}
 
+                    # 获取USDT可用余额
                     usdt_balance = balance_result.get('USDT', {}).get('free', 0)
                     self.logger.debug(f"[{cycle_id}] 实时USDT可用余额: ${usdt_balance:.2f}")
 
                     # 计算基于实时余额的最大可交易金额
+                    # 如果杠杆无效，直接返回错误
+                    if leverage <= 0:
+                        return {'coin': coin, 'success': False, 'error': 'Invalid leverage'}
+                        
                     margin_required = trade_amount / leverage
                     total_required = margin_required + trade_fee
 
                     if usdt_balance < total_required:
                         # 基于可用余额重新计算最大可交易数量
+                        # 如果杠杆为0或负数，直接返回错误
+                        if leverage <= 0:
+                            return {'coin': coin, 'success': False, 'error': 'Invalid leverage'}
+                            
                         max_trade_amount = usdt_balance * (leverage - 1) / leverage  # 预留保证金
-                        max_quantity = max_trade_amount / price
-                        max_quantity = self._adjust_order_quantity(max_quantity, coin)
+                        self.logger.debug(f"[{cycle_id}] 可用余额计算: ${usdt_balance:.2f}, 最大交易金额: ${max_trade_amount:.2f}")
 
-                        if max_quantity <= 0:
-                            return {'coin': coin, 'success': False,
-                                   'error': f'Insufficient balance: ${usdt_balance:.2f} < required ${total_required:.2f}'}
+                        # 重新计算数量
+                        quantity = max_trade_amount / price
+                        self.logger.info(f"[{cycle_id}] 重新计算订单数量: {original_quantity:.6f} -> {quantity:.6f} for {coin} @ ${price:.4f}")
 
-                        self.logger.warning(f"[{cycle_id}] 调整卖出数量 {quantity:.6f} -> {max_quantity:.6f} 基于实时余额")
-                        quantity = max_quantity
+                        # 重新计算交易金额和费用
                         trade_amount = quantity * price
-                        trade_fee = trade_amount * self.fee_rate
+                        trade_fee = self._calculate_precise_fees(trade_amount, coin, leverage, 'sell')
 
                 except Exception as e:
                     self.logger.error(f"[{cycle_id}] 获取实时余额失败: {str(e)}")
-                    return {'coin': coin, 'success': False, 'error': f'Balance check failed: {str(e)}'}
-                # 实盘交易逻辑
-                try:
-                    # live_trading_service 已在文件顶部导入
-                    
-                    # 检查实盘服务连接状态
-                    if not live_trading_service.is_connected:
-                        # 尝试重新连接
-                        live_trading_service._check_connection()
-                        if not live_trading_service.is_connected:
-                            return {'coin': coin, 'success': False, 'error': '实盘交易服务未连接'}
+                    return {'coin': coin, 'success': False, 'error': f'获取实时余额失败: {str(e)}'}
 
-                    # 执行实盘卖出订单（做空）
-                    order_result = live_trading_service.execute_order(
-                        coin=coin,
-                        side='sell',
-                        quantity=quantity,
-                        leverage=leverage,
-                        order_type='market'
-                    )
-
-                    if order_result.get('success'):
-                        # 更新持仓到数据库（做空）
-                        self.db.update_position(self.model_id, coin, quantity, price, leverage, 'short')
-
-                        # 记录交易到数据库
-                        order_id = order_result.get('order_id')
-                        filled_size = order_result.get('filled_size')
-                        message = order_result.get('message', f'[LIVE] Short {quantity:.4f} {coin} @ ${price:.2f}')
-                        instrument_id = order_result.get('instrument_id')
-                        
-                        self.db.add_trade(
-                            self.model_id, coin, 'sell_to_enter', quantity,
-                            price, leverage, 'short', pnl=0, fee=trade_fee,
-                            order_id=order_id,
-                            message=message
-                        )
-
-                        return {
-                            'coin': coin,
-                            'signal': 'sell_to_enter',
-                            'success': True,
-                            'quantity': quantity,
-                            'price': price,
-                            'leverage': leverage,
-                            'fee': trade_fee,
-                            'order_id': order_result.get('order_id'),
-                            'filled_size': order_result.get('filled_size'),
-                            'message': order_result.get('message'),
-                            'instrument_id': order_result.get('instrument_id'),
-                            'mode': 'live'
-                        }
-                    else:
-                        return {
-                            'coin': coin, 
-                            'success': False, 
-                            'error': order_result.get('error', '实盘订单执行失败')
-                        }
-                except Exception as e:
-                    self.logger.error(f"[{cycle_id}] 实盘卖出执行失败 for {coin}: {str(e)}")
-                    return {'coin': coin, 'success': False, 'error': f'实盘卖出执行失败: {str(e)}'}
+            # 执行卖出
+            if self.is_live:
+                order_result = live_trading_service.execute_order(coin, 'sell', quantity, leverage)
             else:
-                # 模拟交易
-                margin_required = trade_amount / leverage
-                total_required = margin_required + trade_fee
+                order_result = self.db.sell(coin, quantity, price, leverage)
 
-                if total_required > portfolio['cash']:
-                    return {'coin': coin, 'success': False, 'error': 'Insufficient cash'}
+            if not order_result.get('success'):
+                return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
 
-                self.db.update_position(self.model_id, coin, quantity, price, leverage, 'short')
-                self.db.add_trade(
-                    self.model_id, coin, 'sell_to_enter', quantity,
-                    price, leverage, 'short', pnl=0, fee=trade_fee,
-                    order_id=None, message=f'[SIM] Short {quantity:.4f} {coin} @ ${price:.2f}'
-                )
+            # 更新投资组合
+            self.db.update_position(self.model_id, coin, quantity, price, leverage, 'short')
 
-                return {
-                    'coin': coin,
-                    'signal': 'sell_to_enter',
-                    'success': True,
-                    'quantity': quantity,
-                    'price': price,
-                    'leverage': leverage,
-                    'fee': trade_fee,
-                    'mode': 'simulation'
-                }
+            # 记录交易
+            self.db.add_trade(
+                self.model_id, coin, 'sell_to_enter', quantity,
+                price, leverage, 'short', pnl=0, fee=trade_fee,
+                order_id=order_result.get('order_id'), message=f'卖出 {quantity:.6f} {coin} @ ${price:.2f}'
+            )
+
+            return {
+                'coin': coin,
+                'signal': 'sell_to_enter',
+                'success': True,
+                'quantity': quantity,
+                'price': price,
+                'leverage': leverage,
+                'fee': trade_fee,
+                'message': f'成功卖出 {quantity:.6f} {coin} @ ${price:.2f}'
+            }
+
         except Exception as e:
-            self.logger.error(f"[{cycle_id}] Sell execution failed for {coin}: {str(e)}")
-            return {'coin': coin, 'success': False, 'error': f'Sell execution failed: {str(e)}'}
+            self.logger.error(f"[{cycle_id}] 卖出执行失败 for {coin}: {str(e)}")
+            return {'coin': coin, 'success': False, 'error': f'卖出执行失败: {str(e)}'}
 
-    def _execute_close(self, coin: str, decision: Dict, market_state: Dict, portfolio: Dict, cycle_id: str) -> Dict:
+    def _execute_close(self, coin: str, decision: Dict, market_state: Dict, portfolio: Dict, cycle_id: str) -> Dict[str, Any]:
         """执行平仓交易"""
-        # 查找当前持仓
-        current_position = None
-        for pos in portfolio.get('positions', []):
-            if pos['coin'] == coin:
-                current_position = pos
-                break
+        try:
+            # 兼容TradingDecision对象和字典格式
+            if isinstance(decision, dict):
+                quantity = float(decision.get('quantity', 0))
+                leverage = int(decision.get('leverage', 1))
+            else:
+                quantity = float(decision.quantity)
+                leverage = int(decision.leverage)
+                
+            price = market_state[coin]['price']
 
-        if not current_position:
-            return {'coin': coin, 'success': False, 'error': 'No position to close'}
+            # 调整订单数量精度以符合交易所要求
+            original_quantity = quantity
+            quantity = self._adjust_order_quantity(quantity, coin)
+            
+            self.logger.info(f"[{cycle_id}] 订单数量调整: {original_quantity:.6f} -> {quantity:.6f} for {coin} @ ${price:.4f}")
 
-        quantity = current_position['quantity']
-        entry_price = current_position['avg_price']
-        side = current_position['side']
-        leverage = current_position['leverage']
-        current_price = market_state[coin]['price']
+            if quantity <= 0:
+                self.logger.warning(f"[{cycle_id}] 无效订单数量 {quantity} for {coin} @ ${price:.4f}")
+                return {'coin': coin, 'success': False, 'error': 'Invalid quantity'}
 
-        # 计算盈亏
-        if side == 'long':
-            pnl = (current_price - entry_price) * quantity
-        else:  # short
-            pnl = (entry_price - current_price) * quantity
+            # 检查调整后的数量是否与原始数量有显著差异
+            if original_quantity > 0 and abs(quantity - original_quantity) / original_quantity > 0.1:  # 差异超过10%
+                self.logger.warning(f"[{cycle_id}] 订单数量调整较大: {original_quantity:.6f} -> {quantity:.6f} for {coin}")
 
-        # 计算费用
-        trade_amount = quantity * current_price
-        trade_fee = trade_amount * self.fee_rate
+            trade_amount = quantity * price
+            # 使用精确的费用计算
+            trade_fee = self._calculate_precise_fees(trade_amount, coin, leverage, 'sell')
 
-        if self.is_live:
-            # 实盘平仓
-            try:
-                # 检查实盘服务连接状态
-                if not live_trading_service.is_connected:
-                    live_trading_service._check_connection()
-                    if not live_trading_service.is_connected:
-                        return {'coin': coin, 'success': False, 'error': '实盘交易服务未连接'}
+            if self.is_live:
+                # 获取实时余额（而非使用缓存的portfolio）
+                try:
+                    balance_result = live_trading_service.get_balance()
+                    if not balance_result.get('success'):
+                        return {'coin': coin, 'success': False, 'error': f'Failed to get balance: {balance_result.get("error", "")}'}
 
-                # 执行实盘平仓
-                close_result = live_trading_service.close_position(coin, quantity)
+                    # 获取USDT可用余额
+                    usdt_balance = balance_result.get('USDT', {}).get('free', 0)
+                    self.logger.debug(f"[{cycle_id}] 实时USDT可用余额: ${usdt_balance:.2f}")
 
-                if close_result.get('success'):
-                    # 更新数据库
-                    self.db.close_position(self.model_id, coin, side)
-                    
-                    # 获取平仓结果信息
-                    order_id = close_result.get('order_id')
-                    closed_size = close_result.get('closed_size')
-                    message = close_result.get('message', f'[LIVE] Close {side} {quantity:.4f} {coin} @ ${current_price:.2f}')
-                    instrument_id = close_result.get('instrument_id')
-                    
-                    self.db.add_trade(
-                        self.model_id, coin, 'close_position', quantity,
-                        current_price, leverage, side, pnl=pnl, fee=trade_fee,
-                        order_id=order_id,
-                        message=message
-                    )
+                    # 计算基于实时余额的最大可交易金额
+                    # 如果杠杆无效，直接返回错误
+                    if leverage <= 0:
+                        return {'coin': coin, 'success': False, 'error': 'Invalid leverage'}
+                        
+                    margin_required = trade_amount / leverage
+                    total_required = margin_required + trade_fee
 
-                    return {
-                        'coin': coin,
-                        'signal': 'close_position',
-                        'success': True,
-                        'quantity': quantity,
-                        'price': current_price,
-                        'leverage': leverage,
-                        'pnl': pnl,
-                        'fee': trade_fee,
-                        'side': side,
-                        'order_id': order_id,
-                        'closed_size': closed_size,
-                        'message': message,
-                        'instrument_id': instrument_id,
-                        'mode': 'live'
-                    }
-                else:
-                    return {
-                        'coin': coin,
-                        'success': False,
-                        'error': close_result.get('error', '实盘平仓失败')
-                    }
-            except Exception as e:
-                self.logger.error(f"[{cycle_id}] 实盘平仓失败 for {coin}: {str(e)}")
-                return {'coin': coin, 'success': False, 'error': f'实盘平仓失败: {str(e)}'}
-        else:
-            # 模拟平仓
-            # 更新数据库
-            self.db.close_position(self.model_id, coin, side)
+                    if usdt_balance < total_required:
+                        # 基于可用余额重新计算最大可交易数量
+                        # 如果杠杆为0或负数，直接返回错误
+                        if leverage <= 0:
+                            return {'coin': coin, 'success': False, 'error': 'Invalid leverage'}
+                            
+                        max_trade_amount = usdt_balance * (leverage - 1) / leverage  # 预留保证金
+                        self.logger.debug(f"[{cycle_id}] 可用余额计算: ${usdt_balance:.2f}, 最大交易金额: ${max_trade_amount:.2f}")
+
+                        # 重新计算数量
+                        quantity = max_trade_amount / price
+                        self.logger.info(f"[{cycle_id}] 重新计算订单数量: {original_quantity:.6f} -> {quantity:.6f} for {coin} @ ${price:.4f}")
+
+                        # 重新计算交易金额和费用
+                        trade_amount = quantity * price
+                        trade_fee = self._calculate_precise_fees(trade_amount, coin, leverage, 'sell')
+
+                except Exception as e:
+                    self.logger.error(f"[{cycle_id}] 获取实时余额失败: {str(e)}")
+                    return {'coin': coin, 'success': False, 'error': f'获取实时余额失败: {str(e)}'}
+
+            # 执行平仓
+            if self.is_live:
+                order_result = live_trading_service.close_position(coin, quantity)
+            else:
+                order_result = self.db.close_position(coin, quantity)
+
+            if not order_result.get('success'):
+                return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
+
+            # 更新投资组合
+            self.db.update_position(self.model_id, coin, quantity, price, leverage, 'short')
+
+            # 记录交易
             self.db.add_trade(
                 self.model_id, coin, 'close_position', quantity,
-                current_price, leverage, side, pnl=pnl, fee=trade_fee,
-                order_id=None, message=f'[SIM] Close {side} {quantity:.4f} {coin} @ ${current_price:.2f}'
+                price, leverage, 'short', pnl=0, fee=trade_fee,
+                order_id=order_result.get('order_id'), message=f'平仓 {quantity:.6f} {coin} @ ${price:.2f}'
             )
 
             return {
@@ -1030,44 +981,15 @@ class EnhancedTradingEngine:
                 'signal': 'close_position',
                 'success': True,
                 'quantity': quantity,
-                'price': current_price,
+                'price': price,
                 'leverage': leverage,
-                'pnl': pnl,
                 'fee': trade_fee,
-                'side': side,
-                'mode': 'simulation'
+                'message': f'成功平仓 {quantity:.6f} {coin} @ ${price:.2f}'
             }
 
-    def _update_portfolio_and_records(self, portfolio: Dict, current_prices: Dict, cycle_id: str) -> Dict:
-        """更新投资组合和记录"""
-        updated_portfolio = self.db.get_portfolio(self.model_id, current_prices)
-        self.db.record_account_value(
-            self.model_id,
-            updated_portfolio['total_value'],
-            updated_portfolio['cash'],
-            updated_portfolio['positions_value']
-        )
-        return updated_portfolio
-
-    def _record_cycle_performance(self, cycle_id: str, cycle_time: float, decisions: Dict, executions: List[Dict]):
-        """记录周期性能"""
-        self.logger.debug(f"[{cycle_id}] Performance - "
-                         f"decisions: {len(decisions)}, "
-                         f"executions: {len(executions)}, "
-                         f"time: {cycle_time:.2f}s")
-
-    def _build_account_info(self, portfolio: Dict) -> Dict:
-        """构建账户信息"""
-        model = self.db.get_model(self.model_id)
-        initial_capital = model['initial_capital']
-        total_value = portfolio['total_value']
-        total_return = ((total_value - initial_capital) / initial_capital) * 100
-
-        return {
-            'current_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'total_return': total_return,
-            'initial_capital': initial_capital
-        }
+        except Exception as e:
+            self.logger.error(f"[{cycle_id}] 平仓执行失败 for {coin}: {str(e)}")
+            return {'coin': coin, 'success': False, 'error': f'平仓执行失败: {str(e)}'}
 
     def _create_error_result(self, error: str, start_time: float, extra_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """创建错误结果"""
@@ -1089,19 +1011,31 @@ class EnhancedTradingEngine:
             'message': 'No trading actions taken'
         }
 
-    def get_engine_status(self) -> Dict:
-        """获取引擎状态"""
-        return {
-            'model_id': self.model_id,
-            'mode': 'live' if self.is_live else 'simulation',
-            'risk_config': self.config.get_risk_manager_config(),
-            'trading_config': self.trading_config,
-            'performance_metrics': self.performance_monitor.get_real_time_metrics(self.model_id),
-            'risk_metrics': self.risk_manager.get_risk_report()
-        }
+    def _update_portfolio_and_records(self, portfolio: Dict, current_prices: Dict, cycle_id: str) -> Dict:
+        """更新投资组合和记录"""
+        # 这里可以添加更新投资组合的逻辑
+        # 目前直接返回原始投资组合
+        return portfolio
 
-    def shutdown(self):
-        """关闭引擎"""
-        self.logger.info(f"Shutting down trading engine for model {self.model_id}")
-        self.thread_pool.shutdown(wait=True)
-        self.logger.info("Trading engine shutdown complete")
+    def _record_cycle_performance(self, cycle_id: str, cycle_time: float, decisions: Dict, execution_results: List[Dict]):
+        """记录周期性能"""
+        # 这里可以添加性能记录逻辑
+        pass
+
+    def _build_account_info(self, portfolio: Dict) -> Dict:
+        """构建账户信息"""
+        model = self.db.get_model(self.model_id)
+        initial_capital = model['initial_capital']
+        total_value = portfolio['total_value']
+        
+        # 防止除零错误
+        if initial_capital > 0:
+            total_return = ((total_value - initial_capital) / initial_capital) * 100
+        else:
+            total_return = 0.0
+
+        return {
+            'current_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_return': total_return,
+            'initial_capital': initial_capital
+        }

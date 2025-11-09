@@ -38,7 +38,6 @@ class RiskManager:
     """风险管理器"""
 
     def __init__(self, config_manager=None, **kwargs):
-
         # 统一配置管理
         try:
             from config_manager import get_config
@@ -53,9 +52,15 @@ class RiskManager:
             self.max_portfolio_risk = kwargs.get('max_portfolio_risk', risk_config.get('max_portfolio_risk', 0.5))
             self.min_trade_size_usd = kwargs.get('min_trade_size_usd', risk_config.get('min_trade_size_usd', 10))
             self.max_positions = kwargs.get('max_positions', risk_config.get('max_positions', 5))
+            # 从配置中获取币种列表
+            self.coins = kwargs.get('monitored_coins', risk_config.get('monitored_coins'))
+            
+            # 如果没有配置币种列表，抛出错误
+            if not self.coins:
+                raise ValueError("No monitored coins configured in risk manager")
 
         except Exception as e:
-            # 回退到kwargs或默认值（如果配置读取失败）
+            # 回退到kwargs（如果配置读取失败）
             self.max_daily_loss = kwargs.get('max_daily_loss', 0.05)
             self.max_position_size = kwargs.get('max_position_size', 0.5)
             self.max_leverage = kwargs.get('max_leverage', 10)
@@ -63,6 +68,12 @@ class RiskManager:
             self.max_portfolio_risk = kwargs.get('max_portfolio_risk', 0.5)
             self.min_trade_size_usd = kwargs.get('min_trade_size_usd', 10)
             self.max_positions = kwargs.get('max_positions', 5)
+            self.coins = kwargs.get('monitored_coins')
+            
+            # 如果没有配置币种列表，抛出错误
+            if not self.coins:
+                raise ValueError("No monitored coins configured in risk manager")
+                
             print(f"Warning: Failed to load config for RiskManager, using defaults: {e}")
 
         # 状态跟踪
@@ -73,15 +84,12 @@ class RiskManager:
         self.circuit_breaker_active = False
         self.circuit_breaker_until = None
 
-        # 支持的交易币种
-        self.coins = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
-
         self.logger = logging.getLogger(__name__)
 
     def validate_trade(self, decision: TradeDecision, portfolio: Dict,
                       market_state: Dict) -> RiskMetrics:
         """综合验证交易决策"""
-
+        
         warnings = []
         checks = {}
 
@@ -109,7 +117,7 @@ class RiskManager:
             position_size_percent=decision.position_size_percent
         )
 
-        checks['min_trade_size'] = self._check_min_trade_size(adjusted_decision, market_state)
+        checks['min_trade_size'] = self._check_min_trade_size(adjusted_decision, market_state, portfolio)
         checks['position_size'] = self._check_position_size(adjusted_decision, portfolio, market_state)
         checks['daily_loss'] = self._check_daily_loss(portfolio)
         checks['liquidity'] = self._check_liquidity(adjusted_decision, market_state, portfolio)
@@ -189,12 +197,20 @@ class RiskManager:
         """检查杠杆有效性"""
         return 1 <= leverage <= self.max_leverage
 
-    def _check_min_trade_size(self, decision: TradeDecision, market_state: Dict) -> bool:
+    def _check_min_trade_size(self, decision: TradeDecision, market_state: Dict, portfolio: Optional[Dict] = None) -> bool:
         """检查最小交易金额"""
         price = self._get_coin_price(decision.coin, market_state)
         trade_value = decision.quantity * price
         # 增加一个小的容忍度（0.1美元）以处理浮点数精度问题
         is_valid = trade_value >= (self.min_trade_size_usd - 0.1)
+        
+        # 如果不满足最小交易金额，但满足50%的最小交易金额且资金紧张，允许执行
+        if not is_valid and trade_value >= self.min_trade_size_usd * 0.5:
+            # 检查是否资金紧张（可用现金小于最小交易金额）
+            available_cash = portfolio.get('cash', 0) if portfolio else 0
+            if available_cash < self.min_trade_size_usd:
+                self.logger.info(f"资金紧张时允许执行 {decision.coin} - 交易金额: ${trade_value:.2f}, 最小要求: ${self.min_trade_size_usd:.2f}")
+                return True
         
         if not is_valid:
             self.logger.warning(f"Min trade size check failed for {decision.coin}: "
@@ -239,7 +255,8 @@ class RiskManager:
             return False
 
         trade_value = decision.quantity * price
-        return trade_value <= portfolio.get('cash', 0) * 0.8  # 不超过现金的80%
+        # 使用更宽松的限制（90%现金可用，而不是80%）
+        return trade_value <= portfolio.get('cash', 0) * 0.9
 
     def _check_correlation(self, decision: TradeDecision, portfolio: Dict, market_state: Dict) -> bool:
         """检查相关性（简化版本）"""
@@ -340,8 +357,8 @@ class RiskManager:
         # 基于余额的最大数量
         max_by_balance = max_trade_amount_by_balance / price
 
-        # 现金限制（原有的80%限制，作为备用）
-        max_by_cash = portfolio.get('cash', 0) * 0.8 / price
+        # 现金限制（原有的90%限制，作为备用）
+        max_by_cash = portfolio.get('cash', 0) * 0.9 / price
 
         # 风险限制 - 修正计算逻辑
         # max_position_size 是基于总价值的仓位比例，不应该再乘以杠杆
@@ -360,42 +377,50 @@ class RiskManager:
             safe_quantity = decision.quantity
             self.logger.info(f"[{decision.coin}] Using AI decision: {decision.quantity:.6f} (${ai_trade_amount:.2f})")
         else:
-            # 资金不足，使用可用余额的2/3策略
+            # 资金不足，使用可用余额的策略
             safe_quantity = max_by_balance
             actual_trade_amount = safe_quantity * price
             self.logger.info(f"[{decision.coin}] AI wants ${ai_trade_amount:.2f}, but only ${actual_trade_amount:.2f} available")
-            self.logger.info(f"[{decision.coin}] Using 2/3 of available balance: {safe_quantity:.6f}")
+            self.logger.info(f"[{decision.coin}] Using available balance: {safe_quantity:.6f}")
 
-        # 3. 确保不低于最小交易金额
+        # 3. 确保不低于最小交易金额，但不超过可用余额
         if safe_quantity * price < self.min_trade_size_usd:
-            safe_quantity = min_quantity_for_trade_size
-            self.logger.info(f"[{decision.coin}] Adjusted to minimum trade size: {safe_quantity:.6f} (${self.min_trade_size_usd:.2f})")
+            # 计算满足最小交易金额的数量
+            min_required_quantity = self.min_trade_size_usd / price
+            # 检查是否有足够的资金满足最小交易金额
+            if min_required_quantity * price <= free_balance * 0.9:  # 90%现金限制
+                safe_quantity = min_required_quantity
+                self.logger.info(f"[{decision.coin}] Adjusted to minimum trade size: {safe_quantity:.6f} (${self.min_trade_size_usd:.2f})")
+            else:
+                # 如果没有足够资金满足最小交易金额，使用最大可用资金
+                safe_quantity = min(safe_quantity, max_by_cash)
+                actual_trade_amount = safe_quantity * price
+                if actual_trade_amount >= self.min_trade_size_usd * 0.5:  # 至少满足50%的最小交易金额
+                    self.logger.info(f"[{decision.coin}] Insufficient funds for minimum trade size, using max available: {safe_quantity:.6f} (${actual_trade_amount:.2f})")
+                else:
+                    self.logger.info(f"[{decision.coin}] Insufficient funds, using reduced amount: {safe_quantity:.6f} (${actual_trade_amount:.2f})")
 
         # 4. 确保不超过其他限制
-        final_limits = {
-            'safe_quantity': safe_quantity,
-            'max_by_risk': max_by_risk,
-            'max_by_cash': max_by_cash,
-            'max_by_leverage': max_by_leverage
-        }
+        final_safe_quantity = min(
+            safe_quantity,
+            max_by_risk,
+            max_by_cash,
+            max_by_leverage
+        )
+        
+        self.logger.info(f"[{decision.coin}] Quantity calculation: {{"
+                        f"'original': {decision.quantity:.6f}, "
+                        f"'ai_trade_amount': {ai_trade_amount:.6f}, "
+                        f"'available_for_trading': {available_for_trading:.6f}, "
+                        f"'min_trade_size': {min_quantity_for_trade_size:.6f}, "
+                        f"'max_by_balance': {max_by_balance:.6f}, "
+                        f"'max_by_cash': {max_by_cash:.6f}, "
+                        f"'max_by_risk': {max_by_risk:.6f}, "
+                        f"'max_by_leverage': {max_by_leverage:.6f}, "
+                        f"'final_safe_quantity': {final_safe_quantity:.6f}"
+                        f"}}")
 
-        safe_quantity = min(final_limits.values())
-
-        quantities = {
-            'original': decision.quantity,
-            'ai_trade_amount': ai_trade_amount,
-            'available_for_trading': max_trade_amount_by_balance,
-            'min_trade_size': min_quantity_for_trade_size,
-            'max_by_balance': max_by_balance,
-            'max_by_cash': max_by_cash,
-            'max_by_risk': max_by_risk,
-            'max_by_leverage': max_by_leverage,
-            'final_safe_quantity': safe_quantity
-        }
-
-        self.logger.info(f"[{decision.coin}] Quantity calculation: {quantities}")
-
-        return max(0, safe_quantity)
+        return final_safe_quantity
 
     def _get_coin_price(self, coin: str, data_source: Dict) -> float:
         """获取币种价格"""

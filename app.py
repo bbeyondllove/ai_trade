@@ -4,6 +4,8 @@ import time
 import threading
 import json
 import re
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from trading_engine import EnhancedTradingEngine
 from async_market_data import get_async_market_fetcher
@@ -14,6 +16,34 @@ from version import __version__, __github_owner__, __repo__, GITHUB_REPO_URL, LA
 
 app = Flask(__name__)
 CORS(app)
+
+# 配置日志
+if not app.debug:
+    # 确保logs目录存在
+    import os
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    
+    # 创建文件处理器
+    file_handler = RotatingFileHandler('logs/app.log', maxBytes=10240, backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.DEBUG)
+    
+    # 配置根日志记录器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+    
+    # 确保Flask的logger也使用相同的处理器
+    app.logger.addHandler(file_handler)
+    app.logger.setLevel(logging.DEBUG)
+    app.logger.propagate = False
+    
+    # 添加启动日志
+    app.logger.info('AITradeGame startup')
+    app.logger.debug('日志系统初始化完成')
 
 db = Database('AITradeGame.db')
 market_fetcher = get_async_market_fetcher()
@@ -40,6 +70,8 @@ def get_providers():
 def add_provider():
     """Add new API provider"""
     data = request.json
+    if data is None:
+        return jsonify({'error': 'No JSON data provided'}), 400
     try:
         provider_id = db.add_provider(
             name=data['name'],
@@ -64,6 +96,8 @@ def delete_provider(provider_id):
 def fetch_provider_models():
     """Fetch available models from provider's API"""
     data = request.json
+    if data is None:
+        return jsonify({'error': 'No JSON data provided'}), 400
     api_url = data.get('api_url')
     api_key = data.get('api_key')
 
@@ -117,6 +151,8 @@ def get_models():
 @app.route('/api/models', methods=['POST'])
 def add_model():
     data = request.json
+    if data is None:
+        return jsonify({'error': 'No JSON data provided'}), 400
     try:
         # Get provider info
         provider = db.get_provider(data['provider_id'])
@@ -134,6 +170,9 @@ def add_model():
         model = db.get_model(model_id)
         
         # Get provider info
+        if model is None:
+            return jsonify({'error': 'Failed to create model'}), 500
+            
         provider = db.get_provider(model['provider_id'])
         if not provider:
             return jsonify({'error': 'Provider not found'}), 404
@@ -182,7 +221,13 @@ def delete_model(model_id):
 @app.route('/api/models/<int:model_id>/portfolio', methods=['GET'])
 def get_portfolio(model_id):
     try:
-        prices_data = market_fetcher.get_current_prices_batch(['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE'])
+        # 从配置管理器获取币种列表
+        from config_manager import get_config
+        config = get_config()
+        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
+            return jsonify({'error': 'No monitored coins configured'}), 500
+        coins = config.risk.monitored_coins
+        prices_data = market_fetcher.get_current_prices_batch(coins)
         current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
 
         portfolio = db.get_portfolio(model_id, current_prices)
@@ -212,12 +257,18 @@ def get_conversations(model_id):
 def get_aggregated_portfolio():
     """Get aggregated portfolio data across all models"""
     try:
-        prices_data = market_fetcher.get_current_prices_batch(['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE'])
+        # 从配置管理器获取币种列表
+        from config_manager import get_config
+        config = get_config()
+        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
+            return jsonify({'error': 'No monitored coins configured'}), 500
+        coins = config.risk.monitored_coins
+        prices_data = market_fetcher.get_current_prices_batch(coins)
         current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
     except Exception as e:
         print(f"[ERROR] Aggregated portfolio fetch failed: {e}")
-        # 使用默认价格
-        current_prices = {'BTC': 0, 'ETH': 0, 'SOL': 0, 'BNB': 0, 'XRP': 0, 'DOGE': 0}
+        # 返回错误而不是使用默认值
+        return jsonify({'error': 'Failed to fetch market data'}), 500
 
     # Get aggregated data
     models = db.get_all_models()
@@ -290,14 +341,19 @@ def get_models_chart_data():
 
 @app.route('/api/market/prices', methods=['GET'])
 def get_market_prices():
-    coins = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
+    # 从配置管理器获取币种列表
+    from config_manager import get_config
+    config = get_config()
+    if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
+        return jsonify({'error': 'No monitored coins configured'}), 500
+    coins = config.risk.monitored_coins
     try:
         prices = market_fetcher.get_current_prices_batch(coins)
         return jsonify(prices)
     except Exception as e:
         print(f"[ERROR] Market prices fetch failed: {e}")
-        # 返回默认价格
-        return jsonify({coin: {'price': 0, 'change_24h': 0} for coin in coins})
+        # 返回错误而不是使用默认值
+        return jsonify({'error': 'Failed to fetch market prices'}), 500
 
 @app.route('/api/models/<int:model_id>/execute', methods=['POST'])
 def execute_trading(model_id):
@@ -336,7 +392,7 @@ def execute_trading(model_id):
         return jsonify({'error': str(e)}), 500
 
 def trading_loop():
-    print("[INFO] Trading loop started")
+    app.logger.info("[INFO] Trading loop started")
     
     while auto_trading:
         try:
@@ -344,64 +400,69 @@ def trading_loop():
                 time.sleep(30)
                 continue
             
-            print(f"\n{'='*60}")
-            print(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"[INFO] Active models: {len(trading_engines)}")
-            print(f"{'='*60}")
+            app.logger.info(f"\n{'='*60}")
+            app.logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            app.logger.info(f"[INFO] Active models: {len(trading_engines)}")
+            app.logger.info(f"{'='*60}")
             
             for model_id, engine in list(trading_engines.items()):
                 try:
-                    print(f"\n[EXEC] Model {model_id}")
+                    app.logger.info(f"\n[EXEC] Model {model_id}")
                     result = engine.execute_trading_cycle()
                     
                     if result.get('success'):
-                        print(f"[OK] Model {model_id} completed")
+                        app.logger.info(f"[OK] Model {model_id} completed")
                         if result.get('executions'):
                             for exec_result in result['executions']:
                                 signal = exec_result.get('signal', 'unknown')
                                 coin = exec_result.get('coin', 'unknown')
                                 msg = exec_result.get('message', '')
                                 if signal != 'hold':
-                                    print(f"  [TRADE] {coin}: {msg}")
+                                    app.logger.info(f"  [TRADE] {coin}: {msg}")
                     else:
                         error = result.get('error', 'Unknown error')
-                        print(f"[WARN] Model {model_id} failed: {error}")
+                        app.logger.warning(f"[WARN] Model {model_id} failed: {error}")
                         
                 except Exception as e:
-                    print(f"[ERROR] Model {model_id} exception: {e}")
+                    app.logger.error(f"[ERROR] Model {model_id} exception: {e}")
                     import traceback
-                    print(traceback.format_exc())
+                    app.logger.error(traceback.format_exc())
                     continue
             
-            print(f"\n{'='*60}")
-            print(f"[SLEEP] Waiting 3 minutes for next cycle")
-            print(f"{'='*60}\n")
+            app.logger.info(f"\n{'='*60}")
+            app.logger.info(f"[SLEEP] Waiting 3 minutes for next cycle")
+            app.logger.info(f"{'='*60}\n")
             
             time.sleep(180)
             
         except Exception as e:
-            print(f"\n[CRITICAL] Trading loop error: {e}")
+            app.logger.error(f"Trading loop error: {e}")
             import traceback
-            print(traceback.format_exc())
-            print("[RETRY] Retrying in 60 seconds\n")
-            time.sleep(60)
+            app.logger.error(traceback.format_exc())
+            time.sleep(180)  # 出错时也等待一段时间再继续
     
-    print("[INFO] Trading loop stopped")
+    app.logger.info("[INFO] Trading loop stopped")
 
 @app.route('/api/leaderboard', methods=['GET'])
 def get_leaderboard():
+    """Get leaderboard data"""
     try:
+        # 从配置管理器获取币种列表
+        from config_manager import get_config
+        config = get_config()
+        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
+            return jsonify({'error': 'No monitored coins configured'}), 500
+        coins = config.risk.monitored_coins
+        
         models = db.get_all_models()
         leaderboard = []
 
-        prices_data = market_fetcher.get_current_prices_batch(['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE'])
+        prices_data = market_fetcher.get_current_prices_batch(coins)
         current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
     except Exception as e:
         print(f"[ERROR] Leaderboard fetch failed: {e}")
-        # 使用默认价格
-        current_prices = {'BTC': 0, 'ETH': 0, 'SOL': 0, 'BNB': 0, 'XRP': 0, 'DOGE': 0}
-        models = db.get_all_models()
-        leaderboard = []
+        # 返回错误而不是使用默认值
+        return jsonify({'error': 'Failed to fetch leaderboard data'}), 500
     
     for model in models:
         portfolio = db.get_portfolio(model['id'], current_prices)
@@ -433,6 +494,8 @@ def update_settings():
     """Update system settings"""
     try:
         data = request.json
+        if data is None:
+            return jsonify({'error': 'No JSON data provided'}), 400
         trading_frequency_minutes = int(data.get('trading_frequency_minutes', 60))
         trading_fee_rate = float(data.get('trading_fee_rate', 0.001))
 
@@ -467,19 +530,18 @@ def get_model_performance(model_id):
         return jsonify({
             'success': True,
             'report': {
-                'win_rate': report.win_rate,
                 'total_trades': report.total_trades,
-                'profitable_trades': report.profitable_trades,
+                'winning_trades': report.winning_trades,
                 'losing_trades': report.losing_trades,
+                'win_rate': report.win_rate,
                 'total_pnl': report.total_pnl,
-                'avg_win': report.avg_win,
-                'avg_loss': report.avg_loss,
-                'profit_factor': report.profit_factor,
-                'sharpe_ratio': report.sharpe_ratio,
+                'total_fees': report.total_fees,
+                'net_pnl': report.net_pnl,
                 'max_drawdown': report.max_drawdown,
-                'avg_execution_time': report.avg_execution_time,
-                'api_success_rate': report.api_success_rate,
-                'error_count': report.error_count
+                'sharpe_ratio': report.sharpe_ratio,
+                'avg_execution_time': report.avg_execution_time_ms,
+                'api_success_rate': 1.0 - report.error_rate,
+                'error_count': int(report.error_rate * report.total_trades)
             }
         })
     except Exception as e:

@@ -115,7 +115,7 @@ class LiveTradingService:
         执行交易订单
 
         Args:
-            coin: 币种 (BTC/ETH/SOL/BNB/XRP/DOGE)
+            coin: 币种 
             side: 交易方向 (buy/sell)
             quantity: 数量
             leverage: 杠杆倍数

@@ -6,7 +6,7 @@
 import json
 import os
 from typing import Dict, Any, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 @dataclass
@@ -22,6 +22,8 @@ class RiskConfig:
     consecutive_loss_limit: int = 3
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.08
+    # 添加币种列表配置，不设置默认值，强制从配置文件读取
+    monitored_coins: Optional[list] = None
 
 @dataclass
 class TradingConfig:
@@ -159,7 +161,8 @@ class ConfigManager:
             'max_drawdown': self.risk.max_drawdown,
             'max_portfolio_risk': self.risk.max_portfolio_risk,
             'min_trade_size_usd': self.risk.min_trade_size_usd,
-            'max_positions': self.risk.max_positions
+            'max_positions': self.risk.max_positions,
+            'monitored_coins': self.risk.monitored_coins
         }
 
     def get_trading_engine_config(self) -> Dict[str, Any]:
