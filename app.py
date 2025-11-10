@@ -24,26 +24,55 @@ if not app.debug:
     if not os.path.exists('logs'):
         os.makedirs('logs')
     
-    # 创建文件处理器
-    file_handler = RotatingFileHandler('logs/app.log', maxBytes=10240, backupCount=10)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-    ))
-    file_handler.setLevel(logging.DEBUG)
+    # 创建带日期的日志文件名
+    from datetime import datetime
+    today = datetime.now().strftime('%Y%m%d')
+    log_filename = f'logs/app_{today}.log'
     
-    # 配置根日志记录器
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
-    root_logger.addHandler(file_handler)
-    
-    # 确保Flask的logger也使用相同的处理器
-    app.logger.addHandler(file_handler)
-    app.logger.setLevel(logging.DEBUG)
-    app.logger.propagate = False
-    
-    # 添加启动日志
-    app.logger.info('AITradeGame startup')
-    app.logger.debug('日志系统初始化完成')
+    # 检查是否已经配置过日志处理器，避免重复添加
+    file_handlers = [handler for handler in app.logger.handlers if isinstance(handler, logging.FileHandler)]
+    if not file_handlers:
+        # 创建文件处理器（不使用RotatingFileHandler，而是每天一个文件）
+        file_handler = logging.FileHandler(log_filename)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+        ))
+        file_handler.setLevel(logging.DEBUG)
+        
+        # 配置根日志记录器
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG)
+        root_logger.addHandler(file_handler)
+        
+        # 确保Flask的logger也使用相同的处理器
+        app.logger.addHandler(file_handler)
+        app.logger.setLevel(logging.DEBUG)
+        app.logger.propagate = False
+        
+        # 添加启动日志
+        app.logger.info('AITradeGame startup')
+        app.logger.debug('日志系统初始化完成')
+    else:
+        # 如果已经存在FileHandler，检查是否需要更新到今天的文件
+        current_handler = file_handlers[0]
+        if hasattr(current_handler, 'baseFilename'):
+            current_filename = os.path.basename(current_handler.baseFilename)
+            if not current_filename.startswith(f'app_{today}'):
+                # 日期已更改，需要创建新的日志文件
+                app.logger.removeHandler(current_handler)
+                file_handler = logging.FileHandler(log_filename)
+                file_handler.setFormatter(logging.Formatter(
+                    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+                ))
+                file_handler.setLevel(logging.DEBUG)
+                
+                root_logger = logging.getLogger()
+                root_logger.addHandler(file_handler)
+                
+                app.logger.addHandler(file_handler)
+                app.logger.info('AITradeGame startup - new day log file')
+            else:
+                app.logger.info('AITradeGame startup - using existing daily log file')
 
 db = Database('AITradeGame.db')
 market_fetcher = get_async_market_fetcher()
@@ -189,7 +218,10 @@ def add_model():
                 max_daily_loss=config_manager.risk.max_daily_loss,
                 max_position_size=config_manager.risk.max_position_size,
                 max_leverage=config_manager.risk.max_leverage,
-                min_trade_size_usd=config_manager.risk.min_trade_size_usd
+                min_trade_size_usd=config_manager.risk.min_trade_size_usd,
+                db=db,  # 传递数据库连接用于记录对话
+                model_id=model_id,  # 传递模型ID用于记录对话
+                config_manager=config_manager  # 传递配置管理器
             ),
             config_manager=config_manager,
             is_live=model.get('is_live', False)
@@ -379,7 +411,10 @@ def execute_trading(model_id):
                 max_daily_loss=config_manager.risk.max_daily_loss,
                 max_position_size=config_manager.risk.max_position_size,
                 max_leverage=config_manager.risk.max_leverage,
-                min_trade_size_usd=config_manager.risk.min_trade_size_usd
+                min_trade_size_usd=config_manager.risk.min_trade_size_usd,
+                db=db,  # 传递数据库连接用于记录对话
+                model_id=model_id,  # 传递模型ID用于记录对话
+                config_manager=config_manager  # 传递配置管理器
             ),
             config_manager=config_manager,
             is_live=model.get('is_live', False)

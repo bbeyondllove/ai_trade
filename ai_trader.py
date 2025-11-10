@@ -56,7 +56,7 @@ class SmartPromptBuilder:
 
     def build(self, market_state: Dict, portfolio: Dict,
               account_info: Dict) -> str:
-        """构建智能提示词 - 专注于策略逻辑"""
+        """构建优化版智能提示词 - 专注于策略逻辑"""
         
         # 计算资金比例
         total_value = portfolio['total_value']
@@ -64,160 +64,86 @@ class SmartPromptBuilder:
         cash_ratio = cash / total_value if total_value > 0 else 0
         position_ratio = 1 - cash_ratio
         
-        # 技术分析
-        tech_analysis = self._analyze_technical_strength(market_state)
+        # 增强技术分析
+        tech_analysis = self._enhanced_technical_analysis(market_state)
 
-        prompt = f"""你是一个专业的加密货币量化交易员，专注于技术分析和风险管理。
+        prompt = f"""
+专业量化交易决策系统 v2.0
+当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-            📊 市场深度分析：
-            {self._build_market_analysis(market_state, tech_analysis)}
+==================== 市场分析 ====================
+实时市场概览：
+{self._build_market_overview(market_state)}
 
-            🎯 技术强度评估：
-            {self._build_technical_strength(tech_analysis)}
+深度技术分析：
+{self._build_enhanced_tech_analysis(tech_analysis)}
 
-            💰 投资组合概况：
-            - 现金比例: {cash_ratio:.1%} (可用于开仓)
-            - 持仓比例: {position_ratio:.1%} (当前已投资)
-            - 持仓数量: {len(portfolio.get('positions', []))}个币种
+多时间框架确认：
+{self._build_multi_timeframe_confirmation(market_state)}
 
-            🛡️ 风险控制框架：
-            - 单日最大亏损: {self.risk_params['max_daily_loss']*100:.1f}%
-            - 单币最大仓位: {self.risk_params['max_position_size']*100:.1f}%
-            - 最大杠杆: {self.risk_params['max_leverage']}x
+市场情绪指标：
+{self._build_market_sentiment(market_state)}
 
-            🎯 双向交易策略：
+关键价格水平
+{self._build_key_levels(market_state)}
 
-            【做多信号条件】
-            ✓ 短期均线 > 长期均线，价格在均线上方
-            ✓ RSI在40-65之间（健康上涨）
-            ✓ 价格突破关键阻力位，成交量放大
-            ✓ MACD金叉或动能向上
+==================== 交易策略 ====================
+{self._build_enhanced_trading_rules()}
 
-            【做空信号条件】  
-            ✓ 短期均线 < 长期均线，价格在均线下方
-            ✓ RSI在70以上（超买）或35以下（弱势）
-            ✓ 价格跌破关键支撑位，成交量放大
-            ✓ MACD死叉或动能向下
+==================== 风险管理 ====================
+{self._build_enhanced_risk_management(cash_ratio)}
 
-            【仓位管理原则】
-            1. 高风险高置信度(>0.8): 分配较大仓位(10-20%可用资金)
-            2. 中等风险置信度(0.6-0.8): 分配中等仓位(5-10%可用资金)  
-            3. 低风险低置信度(<0.6): 分配较小仓位(1-5%可用资金)
-            4. 单币种仓位不超过{self.risk_params['max_position_size']*100:.1f}%总资产
+==================== 资金状况 ====================
+账户概况：
+- 总资产: ${total_value:,.2f}
+- 可用现金: ${cash:,.2f} ({cash_ratio:.1%})
+- 当前持仓: {len(portfolio.get('positions', []))}个币种
+- 资金使用率: {(1-cash_ratio):.1%}
 
-            【资金分配建议】
-            - 现金充足({cash_ratio:.1%}可用): 可积极寻找2-3个机会
-            - 现金适中(20%-50%可用): 选择性开仓1-2个机会
-            - 现金紧张(<20%可用): 谨慎开仓，优先管理现有持仓
+{self._build_portfolio_health_check(portfolio)}
 
-            【风险回报要求】
-            - 做多止损：设置在支撑位下方2-3%
-            - 做多止盈：风险回报比至少1:2
-            - 做空止损：设置在阻力位上方2-3%  
-            - 做空止盈：风险回报比至少1:2
+==================== 决策输出 ====================
+输出要求
+1. 只输出JSON格式，不包含任何其他文字
+2. 每个币种必须有充分的justification
+3. 风险回报比必须≥1.5
+4. 仓位大小必须与置信度匹配
 
-            📋 输出格式（严格JSON）：
-            ```json
-            {{
-            "BTC": {{
-                "signal": "buy_to_enter|sell_to_enter|close_long|close_short|hold",
-                "quantity": 0.15,
-                "leverage": 3,
-                "confidence": 0.82,
-                "stop_loss": 68500.0,
-                "profit_target": 72500.0,
-                "risk_reward_ratio": 2.1,
-                "position_type": "long|short",
-                "position_size_percent": 15.5,
-                "justification": "突破关键阻力位68500，RSI健康上涨，成交量放大，做多信号强烈"
-            }},
-            "ETH": {{
-                "signal": "sell_to_enter",
-                "quantity": 0.8,
-                "leverage": 2,
-                "confidence": 0.71,
-                "stop_loss": 3650.0,
-                "profit_target": 3350.0,
-                "risk_reward_ratio": 1.8,
-                "position_type": "short",
-                "position_size_percent": 12.0,
-                "justification": "跌破支撑位3550，RSI显示超买回调，做空机会"
-            }}
-            }}
-            请基于纯粹的技术分析和风险管理给出交易决策，专注于高概率的交易机会。
-            """
+信号说明
+- buy_to_enter: 开多仓 | sell_to_enter: 开空仓  
+- close_long: 平多仓 | close_short: 平空仓
+- hold: 保持现状
+
+输出格式示例：
+```json
+{{
+  "BTC": {{
+    "signal": "buy_to_enter",
+    "quantity": 0.1,
+    "leverage": 3,
+    "confidence": 0.85,
+    "stop_loss": 68500.0,
+    "profit_target": 72500.0, 
+    "risk_reward_ratio": 2.1,
+    "position_type": "long",
+    "position_size_percent": 12.5,
+    "justification": "多时间框架多头共振，突破68500关键阻力，成交量确认，RSI健康，建议做多"
+  }}
+}}
+```
+
+核心交易原则
+- 趋势为王：只在明显趋势中交易
+- 风险优先：单笔亏损不超过总资金的2%
+- 概率致胜：只参与高胜率交易机会
+
+重要提醒
+- 宁可错过，不要做错
+- 严格控制单笔风险
+- 只在明显趋势中交易
+- 避免过度交易
+"""
         return prompt
-
-    def _analyze_technical_strength(self, market_state: Dict) -> Dict:
-        """分析技术指标强度"""
-        strength_analysis = {}
-        
-        for coin, data in market_state.items():
-            indicators = data.get('indicators', {})
-            score = 0
-            reasons = []
-            
-            # 均线分析
-            sma_7 = self._safe_float(indicators.get('sma_7'))
-            sma_14 = self._safe_float(indicators.get('sma_14'))
-            sma_30 = self._safe_float(indicators.get('sma_30', sma_14))
-            
-            if sma_7 > sma_14 > sma_30:
-                score += 2
-                reasons.append("强势多头排列")
-            elif sma_7 < sma_14 < sma_30:
-                score -= 2
-                reasons.append("强势空头排列")
-            elif sma_7 > sma_14:
-                score += 1
-                reasons.append("短期看涨")
-            else:
-                score -= 1
-                reasons.append("短期看跌")
-            
-            # RSI分析
-            rsi = self._safe_float(indicators.get('rsi_14'))
-            if rsi > 0:
-                if rsi > 70:
-                    score -= 1.5
-                    reasons.append("RSI超买")
-                elif rsi < 30:
-                    score += 1.5
-                    reasons.append("RSI超卖")
-                elif 40 < rsi < 60:
-                    score += 0.5
-                    reasons.append("RSI健康")
-            
-            strength_analysis[coin] = {
-                'score': score,
-                'trend': 'strong_bull' if score >= 1.5 else 'bull' if score > 0 else 'bear' if score < -1.5 else 'weak_bear',
-                'reasons': reasons
-            }
-        
-        return strength_analysis
-
-    def _build_market_analysis(self, market_state: Dict, tech_analysis: Dict) -> str:
-        """构建市场分析部分"""
-        lines = []
-        for coin, data in market_state.items():
-            price = data.get('price', 0)
-            change_24h = data.get('change_24h', 0)
-            volume = data.get('volume_24h', 0)
-            trend = tech_analysis.get(coin, {}).get('trend', 'unknown')
-            
-            lines.append(f"- {coin}: ${price:.2f} ({change_24h:+.2f}%) | 24h量: {volume:.0f} | 趋势: {trend}")
-        
-        return "\n".join(lines)
-
-    def _build_technical_strength(self, tech_analysis: Dict) -> str:
-        """构建技术强度部分"""
-        lines = []
-        for coin, analysis in tech_analysis.items():
-            score = analysis['score']
-            reasons = ', '.join(analysis['reasons'])
-            lines.append(f"- {coin}: 强度评分 {score:+.1f} | 原因: {reasons}")
-        
-        return "\n".join(lines)
 
     def _safe_float(self, value, default: float = 0.0) -> float:
         """安全转换为浮点数"""
@@ -226,6 +152,337 @@ class SmartPromptBuilder:
         except (ValueError, TypeError):
             return default
 
+    def _enhanced_technical_analysis(self, market_state: Dict) -> Dict:
+        """增强版技术分析"""
+        enhanced_analysis = {}
+        
+        for coin, data in market_state.items():
+            indicators = data.get('indicators', {})
+            score = 0
+            signals = []
+            
+            # 多时间框架趋势确认
+            trend_strength = self._calculate_trend_strength(indicators)
+            score += trend_strength['score']
+            signals.extend(trend_strength['signals'])
+            
+            # 动量分析
+            momentum = self._analyze_momentum(indicators)
+            score += momentum['score']
+            signals.extend(momentum['signals'])
+            
+            # 波动率分析
+            volatility = self._analyze_volatility(indicators)
+            score += volatility['score']
+            signals.extend(volatility['signals'])
+            
+            # 成交量确认
+            volume_analysis = self._analyze_volume(indicators, data)
+            score += volume_analysis['score']
+            signals.extend(volume_analysis['signals'])
+            
+            enhanced_analysis[coin] = {
+                'overall_score': score,
+                'trend_strength': trend_strength['strength'],
+                'momentum': momentum['direction'],
+                'volatility_regime': volatility['regime'],
+                'volume_confirmation': volume_analysis['confirmed'],
+                'signals': signals,
+                'recommended_action': self._get_recommended_action(score, signals)
+            }
+        
+        return enhanced_analysis
+
+    def _calculate_trend_strength(self, indicators: Dict) -> Dict:
+        """计算趋势强度"""
+        score = 0
+        signals = []
+        strength = "中性"
+        
+        # 多时间框架均线分析
+        sma_7 = self._safe_float(indicators.get('sma_7'))
+        sma_14 = self._safe_float(indicators.get('sma_14'))
+        sma_30 = self._safe_float(indicators.get('sma_30'))
+        
+        if sma_7 and sma_14 and sma_30:
+            if sma_7 > sma_14 > sma_30:
+                score += 2
+                signals.append("多时间框架多头排列")
+                strength = "强势多头"
+            elif sma_7 < sma_14 < sma_30:
+                score -= 2
+                signals.append("多时间框架空头排列")
+                strength = "强势空头"
+            elif sma_7 > sma_14:
+                score += 1
+                signals.append("短期看涨")
+                strength = "温和多头"
+            elif sma_7 < sma_14:
+                score -= 1
+                signals.append("短期看跌")
+                strength = "温和空头"
+        
+        return {
+            'score': score,
+            'signals': signals,
+            'strength': strength
+        }
+
+    def _analyze_momentum(self, indicators: Dict) -> Dict:
+        """分析动量"""
+        score = 0
+        signals = []
+        direction = "中性"
+        
+        rsi = self._safe_float(indicators.get('rsi_14'))
+        macd = self._safe_float(indicators.get('macd'))
+        macd_signal = self._safe_float(indicators.get('macd_signal'))
+        
+        # RSI分析
+        if rsi > 0:
+            if rsi > 70:
+                score -= 1.5
+                signals.append("RSI超买")
+                direction = "超买"
+            elif rsi < 30:
+                score += 1.5
+                signals.append("RSI超卖")
+                direction = "超卖"
+            elif 45 < rsi < 65:
+                score += 0.5
+                signals.append("RSI健康区间")
+                direction = "健康"
+        
+        # MACD分析
+        if macd is not None and macd_signal is not None:
+            if macd > macd_signal and macd > 0:
+                score += 1
+                signals.append("MACD金叉")
+                if direction == "中性":
+                    direction = "看涨"
+            elif macd < macd_signal and macd < 0:
+                score -= 1
+                signals.append("MACD死叉")
+                if direction == "中性":
+                    direction = "看跌"
+        
+        return {
+            'score': score,
+            'signals': signals,
+            'direction': direction
+        }
+
+    def _analyze_volatility(self, indicators: Dict) -> Dict:
+        """分析波动率"""
+        score = 0
+        signals = []
+        regime = "正常"
+        
+        # 使用ATR指标分析波动率
+        atr = self._safe_float(indicators.get('atr_14'))
+        if atr > 0:
+            # 简化的波动率分析逻辑
+            signals.append(f"ATR: {atr:.4f}")
+            regime = "适中"
+            
+            # 如果ATR较大，表示波动率高
+            if atr > 100:  # 阈值需要根据具体币种调整
+                score -= 0.5
+                regime = "高波动"
+                signals.append("高波动率")
+            elif atr < 20:  # 阈值需要根据具体币种调整
+                score += 0.5
+                regime = "低波动"
+                signals.append("低波动率")
+        
+        return {
+            'score': score,
+            'signals': signals,
+            'regime': regime
+        }
+
+    def _analyze_volume(self, indicators: Dict, data: Dict) -> Dict:
+        """分析成交量"""
+        score = 0
+        signals = []
+        confirmed = False
+        
+        volume = self._safe_float(data.get('volume_24h'))
+        volume_change = self._safe_float(data.get('volume_change_24h'))
+        
+        if volume > 0:
+            signals.append(f"24H成交量: {volume:,.0f}")
+            
+            # 成交量变化分析
+            if volume_change is not None:
+                signals.append(f"成交量变化: {volume_change:+.2f}%")
+                if volume_change > 20:  # 成交量增加20%以上
+                    score += 1
+                    confirmed = True
+                    signals.append("成交量显著放大")
+                elif volume_change < -20:  # 成交量减少20%以上
+                    score -= 1
+                    signals.append("成交量萎缩")
+        
+        return {
+            'score': score,
+            'signals': signals,
+            'confirmed': confirmed
+        }
+
+    def _get_recommended_action(self, score: float, signals: List[str]) -> str:
+        """获取推荐操作"""
+        if score >= 3:
+            return "强烈做多"
+        elif score >= 1:
+            return "温和做多"
+        elif score <= -3:
+            return "强烈做空"
+        elif score <= -1:
+            return "温和做空"
+        else:
+            return "观望"
+
+    def _build_market_overview(self, market_state: Dict) -> str:
+        """构建市场概览"""
+        lines = []
+        for coin, data in market_state.items():
+            price = data.get('price', 0)
+            change_24h = data.get('change_24h', 0)
+            lines.append(f"- {coin}: ${price:.2f} ({change_24h:+.2f}%)")
+        return "\n".join(lines) if lines else "暂无市场数据"
+
+    def _build_enhanced_tech_analysis(self, tech_analysis: Dict) -> str:
+        """构建增强技术分析"""
+        lines = []
+        for coin, analysis in tech_analysis.items():
+            lines.append(f"- {coin}: 综合评分 {analysis['overall_score']:+.1f} | 趋势: {analysis['trend_strength']} | 动量: {analysis['momentum']}")
+        return "\n".join(lines) if lines else "暂无技术分析数据"
+
+    def _build_multi_timeframe_confirmation(self, market_state: Dict) -> str:
+        """构建多时间框架确认"""
+        lines = []
+        for coin in market_state.keys():
+            lines.append(f"- {coin}: 1H/4H/D趋势待确认")
+        return "\n".join(lines) if lines else "暂无多时间框架数据"
+
+    def _build_market_sentiment(self, market_state: Dict) -> str:
+        """构建市场情绪分析"""
+        sentiment_indicators = []
+        
+        for coin, data in market_state.items():
+            # 恐惧贪婪指数逻辑
+            fear_greed = self._calculate_fear_greed_index(data)
+            # 资金流向分析
+            money_flow = self._analyze_money_flow(data)
+            
+            sentiment_indicators.append(
+                f"- {coin}: 情绪指数 {fear_greed}/100 | 资金流向: {money_flow}"
+            )
+        
+        return "\n".join(sentiment_indicators) if sentiment_indicators else "暂无情绪数据"
+
+    def _calculate_fear_greed_index(self, data: Dict) -> int:
+        """计算恐惧贪婪指数"""
+        # 简化的实现，实际应用中可以结合更多指标
+        change_24h = self._safe_float(data.get('change_24h', 0))
+        
+        # 基于24小时变化率的简单情绪指数
+        if change_24h > 5:
+            return min(100, 50 + int(change_24h * 2))
+        elif change_24h < -5:
+            return max(0, 50 + int(change_24h * 2))
+        else:
+            return 50
+
+    def _analyze_money_flow(self, data: Dict) -> str:
+        """分析资金流向"""
+        volume_change = self._safe_float(data.get('volume_change_24h', 0))
+        
+        if volume_change > 20:
+            return "资金流入"
+        elif volume_change < -20:
+            return "资金流出"
+        else:
+            return "资金稳定"
+
+    def _build_key_levels(self, market_state: Dict) -> str:
+        """构建关键价格水平"""
+        lines = []
+        for coin, data in market_state.items():
+            price = data.get('price', 0)
+            # 简化的关键价格水平计算
+            resistance = price * 1.05  # 简单的5%阻力位
+            support = price * 0.95     # 简单的5%支撑位
+            lines.append(f"- {coin}: 支撑 ${support:.2f} | 阻力 ${resistance:.2f}")
+        return "\n".join(lines) if lines else "暂无关键价格水平"
+
+    def _build_enhanced_trading_rules(self) -> str:
+        """构建增强版交易规则"""
+        return """
+【高级交易信号框架】
+
+强势做多信号（需满足3个以上条件）：
+1. 多时间框架共振：1H/4H/Daily均呈多头排列
+2. 价格突破关键阻力位且回踩确认
+3. RSI在45-65健康区间，无背离
+4. 成交量放大确认突破
+5. MACD在零轴上方金叉
+6. 波动率适中（非极端行情）
+
+强势做空信号（需满足3个以上条件）：
+1. 多时间框架共振下跌
+2. 价格跌破关键支撑位且反弹无力
+3. RSI>70出现顶背离，或RSI<30但持续弱势
+4. 下跌时成交量放大
+5. MACD在零轴下方死叉
+6. 波动率开始上升
+
+禁止开仓条件：
+- 重大经济数据发布前后30分钟
+- 波动率异常放大（超过平均2倍）
+- 流动性不足时段（如凌晨3-5点）
+- 多指标出现背离矛盾
+"""
+
+    def _build_enhanced_risk_management(self, cash_ratio: float) -> str:
+        """构建增强版风险管理"""
+        return f"""
+【智能仓位管理】
+
+基于凯利公式优化的仓位分配：
+- 高置信度(>0.8) + 强趋势：分配15-20%可用资金
+- 中置信度(0.6-0.8) + 明确趋势：分配8-12%可用资金  
+- 低置信度(0.5-0.6) + 一般机会：分配3-5%可用资金
+- 低于0.5置信度：放弃交易
+
+【动态资金分配】
+当前现金比例: {cash_ratio:.1%}
+{self._get_cash_allocation_strategy(cash_ratio)}
+
+【风险分散原则】
+- 同板块币种不超过2个
+- 总持仓币种不超过5个
+- 相关性高的币种避免同时重仓
+"""
+
+    def _get_cash_allocation_strategy(self, cash_ratio: float) -> str:
+        """获取现金分配策略"""
+        if cash_ratio > 0.5:
+            return "现金充足: 可积极寻找3-5个机会"
+        elif cash_ratio > 0.2:
+            return "现金适中: 选择性开仓2-3个机会"
+        else:
+            return "现金紧张: 谨慎开仓，优先管理现有持仓"
+
+    def _build_portfolio_health_check(self, portfolio: Dict) -> str:
+        """构建投资组合健康检查"""
+        positions = portfolio.get('positions', [])
+        if not positions:
+            return "当前无持仓，风险较低"
+        
+        total_positions = len(positions)
+        return f"当前持仓{total_positions}个币种，建议关注仓位分布和相关性"
 
 class ExecutionValidator:
     """执行验证器 - 在执行层面验证和调整交易决策"""
@@ -468,38 +725,27 @@ class ConfigurableAITrader(BaseAITrader):
     """优化版可配置的AI交易器"""
 
     def __init__(self, provider_type: str, api_key: str, api_url: str, model_name: str,
-                 config_manager=None, **kwargs):
-        self.provider_type = provider_type.lower()
+                 max_daily_loss: float = 0.02, max_position_size: float = 0.3,
+                 max_leverage: int = 5, min_trade_size_usd: float = 10.0,
+                 consecutive_loss_limit: int = 5, max_concurrent_trades: int = 3,
+                 **kwargs):
+        # API配置
+        self.provider_type = provider_type
         self.api_key = api_key
         self.api_url = api_url
         self.model_name = model_name
 
-        # 统一配置管理
-        try:
-            from config_manager import get_config
-            self.config = config_manager or get_config()
-            ai_config = self.config.get_ai_trader_config()
-
-            # 从统一配置获取参数，kwargs可以覆盖（用于测试）
-            self.max_daily_loss = kwargs.get('max_daily_loss', ai_config.get('max_daily_loss', 0.05))
-            self.max_position_size = kwargs.get('max_position_size', ai_config.get('max_position_size', 0.5))
-            self.max_leverage = kwargs.get('max_leverage', ai_config.get('max_leverage', 10))
-            self.min_trade_size_usd = kwargs.get('min_trade_size_usd', ai_config.get('min_trade_size_usd', 10))
-            self.consecutive_loss_limit = kwargs.get('consecutive_loss_limit', ai_config.get('consecutive_loss_limit', 3))
-            self.max_concurrent_trades = kwargs.get('max_concurrent_trades', 3)
-
-        except Exception as e:
-            # 回退到kwargs或默认值（如果配置读取失败）
-            self.max_daily_loss = kwargs.get('max_daily_loss', 0.05)
-            self.max_position_size = kwargs.get('max_position_size', 0.5)
-            self.max_leverage = kwargs.get('max_leverage', 10)
-            self.min_trade_size_usd = kwargs.get('min_trade_size_usd', 10)
-            self.consecutive_loss_limit = kwargs.get('consecutive_loss_limit', 3)
-            self.max_concurrent_trades = kwargs.get('max_concurrent_trades', 3)
-            print(f"Warning: Failed to load config, using defaults: {e}")
+        # 风险参数
+        self.max_daily_loss = max_daily_loss
+        self.max_position_size = max_position_size
+        self.max_leverage = max_leverage
+        self.min_trade_size_usd = min_trade_size_usd
+        self.consecutive_loss_limit = consecutive_loss_limit
+        self.max_concurrent_trades = max_concurrent_trades
 
         # 日志和监控
         log_level = kwargs.get('log_level', logging.INFO)
+        # 移除logging.basicConfig，使用Flask应用的日志配置
         self.logger = logging.getLogger(f"AITrader.{model_name}")
         self.logger.setLevel(log_level)
 
@@ -516,7 +762,14 @@ class ConfigurableAITrader(BaseAITrader):
             'max_leverage': self.max_leverage
         }
         self.prompt_builder = SmartPromptBuilder(risk_params)
-        self.validator = ExecutionValidator(config_manager=self.config)
+        # 修复config_manager引用问题
+        self.config_manager = kwargs.get('config_manager', None)
+        self.validator = ExecutionValidator(config_manager=self.config_manager)
+        
+        # 数据库连接（用于记录对话）
+        self.db = kwargs.get('db', None)
+        # 保存模型ID用于记录对话
+        self.model_id = kwargs.get('model_id', 0)
 
         # HTTP Session
         self.session = self._create_session()
@@ -621,6 +874,17 @@ class ConfigurableAITrader(BaseAITrader):
             # 调用AI API
             response = self._call_llm_with_retry(prompt)
             self.logger.debug(f"AI Trader 原始响应: {response}")
+            
+            # 记录对话到数据库（如果提供了数据库连接）
+            if self.db is not None:
+                try:
+                    self.db.record_conversation(
+                        model_id=getattr(self, 'model_id', 0),
+                        user_prompt=prompt,
+                        ai_response=response
+                    )
+                except Exception as e:
+                    self.logger.error(f"记录对话到数据库失败: {e}")
             
             # 解析响应
             decisions = self._parse_response(response, market_state)
