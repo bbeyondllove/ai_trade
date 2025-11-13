@@ -9,6 +9,7 @@ class TradingApp {
             trades: null
         };
         this.isChinese = this.detectLanguage();
+        this.chartResizeHandler = null; // 图表resize事件处理器
         this.init();
     }
 
@@ -162,19 +163,50 @@ class TradingApp {
     }
 
     async showAggregatedView() {
+        // 如果已经在聚合视图，不做任何操作
+        if (this.isAggregatedView && !this.currentModelId) {
+            return;
+        }
+        
         this.isAggregatedView = true;
         this.currentModelId = null;
-        this.loadModels();
-        await this.loadAggregatedData();
+        
+        // 先快速更新UI状态
+        this.updateModelListActiveState();
         this.hideTabsInAggregatedView();
+        
+        // 异步加载数据
+        await this.loadAggregatedData();
     }
 
     async selectModel(modelId) {
+        // 如果切换到同一个模型，不做任何操作
+        if (this.currentModelId === modelId && !this.isAggregatedView) {
+            return;
+        }
+        
         this.currentModelId = modelId;
         this.isAggregatedView = false;
-        this.loadModels();
-        await this.loadModelData();
+        
+        // 先快速更新UI状态，不重新加载模型列表
+        this.updateModelListActiveState();
         this.showTabsInSingleModelView();
+        
+        // 异步加载数据
+        await this.loadModelData();
+    }
+    
+    updateModelListActiveState() {
+        // 只更新active状态，不重新渲染整个列表
+        document.querySelectorAll('.model-item').forEach(item => {
+            item.classList.remove('active');
+        });
+        
+        if (this.isAggregatedView) {
+            document.querySelector('.model-item[onclick*="showAggregatedView"]')?.classList.add('active');
+        } else if (this.currentModelId) {
+            document.querySelector(`.model-item[onclick*="selectModel(${this.currentModelId})"]`)?.classList.add('active');
+        }
     }
 
     async loadModelData() {
@@ -228,9 +260,15 @@ class TradingApp {
     }
 
     updateStats(portfolio, isAggregated = false) {
+        // 实盘模式下，可用现金显示free_balance，模拟盘显示cash
+        const isLive = portfolio.is_live || false;
+        const cashValue = isLive && portfolio.free_balance !== undefined 
+            ? portfolio.free_balance 
+            : portfolio.cash || 0;
+        
         const stats = [
             { value: portfolio.total_value || 0, isPnl: false },
-            { value: portfolio.cash || 0, isPnl: false },
+            { value: cashValue, isPnl: false },
             { value: portfolio.realized_pnl || 0, isPnl: true },
             { value: portfolio.unrealized_pnl || 0, isPnl: true }
         ];
@@ -256,17 +294,26 @@ class TradingApp {
     updateSingleModelChart(history, currentValue) {
         const chartDom = document.getElementById('accountChart');
 
-        // Dispose existing chart to avoid state pollution
-        if (this.chart) {
+        // 只在需要时dispose图表
+        if (this.chart && this.chart._dom !== chartDom) {
             this.chart.dispose();
+            this.chart = null;
         }
-
-        this.chart = echarts.init(chartDom);
-        window.addEventListener('resize', () => {
-            if (this.chart) {
-                this.chart.resize();
+        
+        // 复用已存在的图表实例
+        if (!this.chart) {
+            this.chart = echarts.init(chartDom);
+            
+            // 只添加一次resize监听器
+            if (!this.chartResizeHandler) {
+                this.chartResizeHandler = () => {
+                    if (this.chart) {
+                        this.chart.resize();
+                    }
+                };
+                window.addEventListener('resize', this.chartResizeHandler);
             }
-        });
+        }
 
         const data = history.reverse().map(h => ({
             time: new Date(h.timestamp.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', {
@@ -358,17 +405,26 @@ class TradingApp {
     updateMultiModelChart(chartData) {
         const chartDom = document.getElementById('accountChart');
 
-        // Dispose existing chart to avoid state pollution
-        if (this.chart) {
+        // 只在需要时dispose图表
+        if (this.chart && this.chart._dom !== chartDom) {
             this.chart.dispose();
+            this.chart = null;
         }
-
-        this.chart = echarts.init(chartDom);
-        window.addEventListener('resize', () => {
-            if (this.chart) {
-                this.chart.resize();
+        
+        // 复用已存在的图表实例
+        if (!this.chart) {
+            this.chart = echarts.init(chartDom);
+            
+            // 只添加一次resize监听器
+            if (!this.chartResizeHandler) {
+                this.chartResizeHandler = () => {
+                    if (this.chart) {
+                        this.chart.resize();
+                    }
+                };
+                window.addEventListener('resize', this.chartResizeHandler);
             }
-        });
+        }
 
         if (!chartData || chartData.length === 0) {
             // Show empty state for multi-model chart

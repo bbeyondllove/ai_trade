@@ -259,13 +259,14 @@ class LiveTradingService:
                             # 获取各项余额
                             avail_bal = float(item.get('availBal', 0))  # 可用余额
                             frozen_bal = float(item.get('frozenBal', 0))  # 冻结余额
-                            eq = float(item.get('eq', 0))  # 币种总权益
+                            total_bal = avail_bal + frozen_bal  # 总余额 = 可用 + 冻结
                             
-                            # 使用eq作为total，它是币种总权益
+                            logger.info(f"USDT Balance - Free: {avail_bal}, Used: {frozen_bal}, Total: {total_bal}")
+                            
                             usdt_balance = {
                                 'free': avail_bal,
                                 'used': frozen_bal,
-                                'total': eq  # 使用eq作为总余额
+                                'total': total_bal
                             }
                             break
                     
@@ -584,16 +585,21 @@ class LiveTradingService:
                 order_data = result.get('data', [])
                 if order_data:
                     order = order_data[0]
+                    # 获取更多平仓信息
+                    order_id = order.get('ordId', '')
+                    s_code = order.get('sCode', '0')
+                    s_msg = order.get('sMsg', '平仓订单已提交')
+                    
                     return {
                         'success': True,
-                        'order_id': order.get('ordId', ''),
+                        'order_id': order_id,
                         'closed_size': target_position['size'],
-                        'status': order.get('sCode', '0'),
+                        'status': s_code,
                         'entry_price': target_position.get('entry_price', 0),
                         'unrealized_pnl': target_position.get('unrealized_pnl', 0),
                         'leverage': target_position.get('leverage', 1),
                         'trade_id': target_position.get('trade_id', ''),
-                        'message': order.get('sMsg', '平仓订单已提交'),
+                        'message': s_msg,
                         'instrument_id': symbol
                     }
                 else:
@@ -611,12 +617,21 @@ class LiveTradingService:
                         'instrument_id': symbol
                     }
             else:
+                # 获取更详细的错误信息
+                error_code = result.get('code', 'Unknown') if result else 'Connection failed'
                 error_msg = result.get('msg', 'API error') if result else 'Connection failed'
-                return {'success': False, 'error': f'平仓失败: {error_msg}'}
+                error_data = result.get('data', []) if result else []
+                
+                detailed_error = f"平仓API错误: 错误码 {error_code}, 错误信息 {error_msg}"
+                if error_data:
+                    detailed_error += f", 错误数据 {error_data}"
+                    
+                logger.error(detailed_error)
+                return {'error': detailed_error}
                 
         except Exception as e:
-            logger.error(f"平仓异常: {e}")
-            return {'success': False, 'error': str(e)}
+            logger.error(f"平仓失败: {e}")
+            return {'error': str(e)}
 
     def health_check(self) -> Dict:
         """健康检查"""

@@ -303,10 +303,12 @@ class Database:
                 for live_pos in live_positions:
                     # 转换实盘持仓格式为统一格式
                     coin = live_pos.get('coin')
-                    quantity = float(live_pos.get('quantity', 0))
-                    avg_price = float(live_pos.get('avg_price', 0))
+                    # live_trading_service返回的字段是size和entry_price
+                    quantity = float(live_pos.get('size', 0))  # 使用size字段
+                    avg_price = float(live_pos.get('entry_price', 0))  # 使用entry_price字段
                     side = live_pos.get('side', 'long')
                     leverage = float(live_pos.get('leverage', 1))
+                    unrealized_pnl_from_api = float(live_pos.get('unrealized_pnl', 0))  # 直接使用API返回的未实现盈亏
                     
                     if quantity <= 0:
                         continue
@@ -314,14 +316,15 @@ class Database:
                     # 获取当前价格
                     current_price = current_prices.get(coin) if current_prices else None
                     
-                    # 计算未实现盈亏
-                    pnl = 0
-                    if current_price:
+                    # 计算未实现盈亏（优先使用API返回的值，如果没有则计算）
+                    pnl = unrealized_pnl_from_api
+                    if pnl == 0 and current_price:
                         if side == 'long':
                             pnl = (current_price - avg_price) * quantity
                         else:
                             pnl = (avg_price - current_price) * quantity
-                        unrealized_pnl += pnl
+                    
+                    unrealized_pnl += pnl
                     
                     # 计算持仓价值和保证金
                     position_value = quantity * avg_price
