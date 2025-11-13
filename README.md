@@ -61,18 +61,6 @@ python app.py
 
 服务启动后会自动打开浏览器访问 `http://localhost:5000`
 
-**方式二：Docker部署（推荐生产）**
-
-```bash
-docker build -t aitradegame .
-docker run -d -p 5000:5000 -v $(pwd)/data:/app/data aitradegame
-```
-
-或使用 docker-compose：
-
-```bash
-docker-compose up -d
-```
 
 ## 使用说明
 
@@ -130,5 +118,6 @@ docker-compose up -d
 ## License
 
 开源项目，供学习交流使用
+
 
 
