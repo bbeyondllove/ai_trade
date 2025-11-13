@@ -873,12 +873,22 @@ class ConfigurableAITrader(BaseAITrader):
             
             # 调用AI API
             response = self._call_llm_with_retry(prompt)
+            
+            # 记录LLM对话（INFO级别，清晰格式）
+            self.logger.info("=" * 80)
+            self.logger.info(f"[LLM对话] 模型: {self.model_name}")
+            self.logger.info("-" * 80)
+            self.logger.info(f"[用户提示]\n{prompt}")
+            self.logger.info("-" * 80)
+            self.logger.info(f"[AI响应]\n{response}")
+            self.logger.info("=" * 80)
+            
             self.logger.debug(f"AI Trader 原始响应: {response}")
             
             # 记录对话到数据库（如果提供了数据库连接）
             if self.db is not None:
                 try:
-                    self.db.record_conversation(
+                    self.db.add_conversation(
                         model_id=getattr(self, 'model_id', 0),
                         user_prompt=prompt,
                         ai_response=response

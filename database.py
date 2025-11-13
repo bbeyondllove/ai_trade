@@ -243,100 +243,155 @@ class Database:
         realized_pnl = 0
         unrealized_pnl = 0
 
-        # 如果是实盘模式，需要特殊处理持仓隔离
+        # 如果是实盘模式，从实盘API获取余额和持仓
         if is_live:
             try:
                 from live_trading_service import live_trading_service
 
-                # 获取实盘余额（用于余额显示）
+                # 获取实盘余额
                 live_balance_result = live_trading_service.get_balance()
-
-                if live_balance_result.get('success'):
-                    # 实盘模式下，持仓数据按model_id从数据库获取（实现模型隔离）
-                    # 从portfolios表获取该模型的持仓
-                    cursor.execute('''
-                        SELECT * FROM portfolios WHERE model_id = ? AND quantity > 0
-                    ''', (model_id,))
-                    db_positions = [dict(row) for row in cursor.fetchall()]
-
-                    positions = []
-                    unrealized_pnl = 0
-
-                    for db_pos in db_positions:
-                        # 添加当前价格并计算未实现盈亏
-                        if current_prices and db_pos['coin'] in current_prices:
-                            current_price = current_prices[db_pos['coin']]
-                            entry_price = db_pos['avg_price']
-                            quantity = db_pos['quantity']
-                            side = db_pos['side']
-
-                            db_pos['current_price'] = current_price
-
-                            # 计算未实现盈亏
-                            if side == 'long':
-                                pnl = (current_price - entry_price) * quantity
-                            else:
-                                pnl = (entry_price - current_price) * quantity
-
-                            db_pos['pnl'] = pnl
-                            unrealized_pnl += pnl
-                        else:
-                            db_pos['current_price'] = None
-                            db_pos['pnl'] = 0
-
-                        positions.append(db_pos)
-
-                    # 使用实盘余额数据
-                    usdt_balance = live_balance_result.get('USDT', {})
-                    cash = usdt_balance.get('free', 0)
-                    
-                    # 计算持仓的当前价值（使用当前价格）
-                    current_positions_value = 0
-                    if current_prices:
-                        for p in positions:
-                            coin = p['coin']
-                            if coin in current_prices:
-                                current_positions_value += p['quantity'] * current_prices[coin]
-                    
-                    # 总价值 = 现金 + 持仓当前价值
-                    total_value = cash + current_positions_value
-                    
-                    # 计算保证金使用情况
-                    margin_used = sum([p['quantity'] * p['avg_price'] / p['leverage'] for p in positions])
-                    
-                    # 持仓价值按开仓价计算（用于显示）
-                    positions_value = sum([p['quantity'] * p['avg_price'] for p in positions])
-
-                    # 从数据库获取已实现盈亏
-                    cursor.execute('''
-                        SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE model_id = ?
-                    ''', (model_id,))
-                    realized_pnl = cursor.fetchone()['total_pnl']
-
-                    # 添加free_balance字段用于风险管理
-                    portfolio_data = {
+                if not live_balance_result.get('success'):
+                    print(f"[WARN] Failed to get live balance for model {model_id}: {live_balance_result.get('error', 'Unknown error')}")
+                    conn.close()
+                    return {
                         'model_id': model_id,
-                        'cash': cash,
-                        'free_balance': cash,  # 实盘可用余额
-                        'positions': positions,
-                        'positions_value': positions_value,
-                        'margin_used': margin_used,
-                        'total_value': total_value,
-                        'realized_pnl': realized_pnl,
-                        'unrealized_pnl': unrealized_pnl,
-                        'is_live': True
+                        'cash': 0,
+                        'free_balance': 0,
+                        'positions': [],
+                        'positions_value': 0,
+                        'margin_used': 0,
+                        'total_value': 0,
+                        'realized_pnl': 0,
+                        'unrealized_pnl': 0,
+                        'is_live': True,
+                        'initial_capital': initial_capital,
+                        'error': f"实盘API调用失败: {live_balance_result.get('error', 'Unknown error')}"
                     }
 
+                # 获取实盘持仓
+                live_positions_result = live_trading_service.get_positions()
+                if not live_positions_result.get('success'):
+                    print(f"[WARN] Failed to get live positions for model {model_id}: {live_positions_result.get('error', 'Unknown error')}")
                     conn.close()
-                    return portfolio_data
+                    return {
+                        'model_id': model_id,
+                        'cash': 0,
+                        'free_balance': 0,
+                        'positions': [],
+                        'positions_value': 0,
+                        'margin_used': 0,
+                        'total_value': 0,
+                        'realized_pnl': 0,
+                        'unrealized_pnl': 0,
+                        'is_live': True,
+                        'initial_capital': initial_capital,
+                        'error': f"获取实盘持仓失败: {live_positions_result.get('error', 'Unknown error')}"
+                    }
 
-                else:
-                    print(f"[WARN] Failed to get live balance for model {model_id}, falling back to simulation data")
-                    is_live = False  # 回退到模拟模式计算
+                # 解析实盘余额
+                usdt_balance = live_balance_result.get('USDT', {})
+                cash = usdt_balance.get('total', 0)  # 使用total总余额
+                free_balance = usdt_balance.get('free', 0)  # 可用余额用于风控
+                
+                # 解析实盘持仓数据
+                live_positions = live_positions_result.get('positions', [])
+                positions = []
+                unrealized_pnl = 0
+                positions_value = 0
+                margin_used = 0
+
+                for live_pos in live_positions:
+                    # 转换实盘持仓格式为统一格式
+                    coin = live_pos.get('coin')
+                    quantity = float(live_pos.get('quantity', 0))
+                    avg_price = float(live_pos.get('avg_price', 0))
+                    side = live_pos.get('side', 'long')
+                    leverage = float(live_pos.get('leverage', 1))
+                    
+                    if quantity <= 0:
+                        continue
+                    
+                    # 获取当前价格
+                    current_price = current_prices.get(coin) if current_prices else None
+                    
+                    # 计算未实现盈亏
+                    pnl = 0
+                    if current_price:
+                        if side == 'long':
+                            pnl = (current_price - avg_price) * quantity
+                        else:
+                            pnl = (avg_price - current_price) * quantity
+                        unrealized_pnl += pnl
+                    
+                    # 计算持仓价值和保证金
+                    position_value = quantity * avg_price
+                    positions_value += position_value
+                    margin_used += position_value / leverage
+                    
+                    positions.append({
+                        'coin': coin,
+                        'quantity': quantity,
+                        'avg_price': avg_price,
+                        'side': side,
+                        'leverage': leverage,
+                        'current_price': current_price,
+                        'pnl': pnl
+                    })
+                
+                # 计算持仓当前价值（用于显示，但不计入total_value）
+                current_positions_value = 0
+                if current_prices:
+                    for p in positions:
+                        coin = p['coin']
+                        if coin in current_prices:
+                            current_positions_value += p['quantity'] * current_prices[coin]
+                
+                # 实盘模式：账户总值直接使用OKX返回的total余额
+                # total = free + frozen（已包含所有资产）
+                total_value = cash
+
+                # 从数据库获取已实现盈亏（仅用于统计）
+                cursor.execute('''
+                    SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE model_id = ?
+                ''', (model_id,))
+                realized_pnl = cursor.fetchone()['total_pnl']
+
+                portfolio_data = {
+                    'model_id': model_id,
+                    'cash': cash,  # 总余额（账户总值）
+                    'free_balance': free_balance,  # 可用余额用于风控
+                    'positions': positions,
+                    'positions_value': positions_value,  # 持仓价值（按开仓价）
+                    'margin_used': margin_used,
+                    'total_value': total_value,  # 账户总值 = OKX的total余额
+                    'realized_pnl': realized_pnl,  # 数据库统计的已实现盈亏
+                    'unrealized_pnl': unrealized_pnl,  # 持仓未实现盈亏
+                    'is_live': True,
+                    'initial_capital': initial_capital if initial_capital > 0 else total_value
+                }
+
+                conn.close()
+                return portfolio_data
 
             except Exception as e:
                 print(f"[ERROR] Error getting live data for model {model_id}: {e}")
-                is_live = False  # 回退到模拟模式计算
+                import traceback
+                traceback.print_exc()
+                conn.close()
+                return {
+                    'model_id': model_id,
+                    'cash': 0,
+                    'free_balance': 0,
+                    'positions': [],
+                    'positions_value': 0,
+                    'margin_used': 0,
+                    'total_value': 0,
+                    'realized_pnl': 0,
+                    'unrealized_pnl': 0,
+                    'is_live': True,
+                    'initial_capital': initial_capital,
+                    'error': f"获取实盘数据异常: {str(e)}"
+                }
 
         # 如果不是实盘模式或实盘获取失败，使用数据库数据
         if not is_live:

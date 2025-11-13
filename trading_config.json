@@ -7,7 +7,7 @@
     "consecutive_loss_limit": 3,
     "max_risk_per_trade": 0.02,
     "emergency_stop_loss": 0.15,
-    "monitored_coins": [ "WLFI", "STRK", "SQL", "BTC"]
+    "monitored_coins": [ "BTC", "ETH", "SQL", "BNB", "XRP", "DOGE"]
   },
   "trading": {
     "fee_rate": 0.001,

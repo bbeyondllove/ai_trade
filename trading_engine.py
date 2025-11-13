@@ -750,11 +750,11 @@ class EnhancedTradingEngine:
             # 执行买入
             if self.is_live:
                 order_result = live_trading_service.execute_order(coin, 'buy', quantity, leverage)
+                if not order_result.get('success'):
+                    return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
             else:
-                order_result = self.db.buy(coin, quantity, price, leverage)
-
-            if not order_result.get('success'):
-                return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
+                # 模拟盘模式，直接返回成功
+                order_result = {'success': True, 'order_id': None}
 
             # 更新投资组合
             self.db.update_position(self.model_id, coin, quantity, price, leverage, 'long')
@@ -855,11 +855,11 @@ class EnhancedTradingEngine:
             # 执行卖出
             if self.is_live:
                 order_result = live_trading_service.execute_order(coin, 'sell', quantity, leverage)
+                if not order_result.get('success'):
+                    return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
             else:
-                order_result = self.db.sell(coin, quantity, price, leverage)
-
-            if not order_result.get('success'):
-                return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
+                # 模拟盘模式，直接返回成功
+                order_result = {'success': True, 'order_id': None}
 
             # 更新投资组合
             self.db.update_position(self.model_id, coin, quantity, price, leverage, 'short')
@@ -960,14 +960,14 @@ class EnhancedTradingEngine:
             # 执行平仓
             if self.is_live:
                 order_result = live_trading_service.close_position(coin, quantity)
+                if not order_result.get('success'):
+                    return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
             else:
-                order_result = self.db.close_position(coin, quantity)
+                # 模拟盘模式，直接返回成功
+                order_result = {'success': True, 'order_id': None}
 
-            if not order_result.get('success'):
-                return {'coin': coin, 'success': False, 'error': order_result.get('error', 'Unknown error')}
-
-            # 更新投资组合
-            self.db.update_position(self.model_id, coin, quantity, price, leverage, 'short')
+            # 删除持仓（平仓后清除记录）
+            self.db.close_position(self.model_id, coin, 'long')  # 默认假设是多头平仓
 
             # 记录交易
             self.db.add_trade(

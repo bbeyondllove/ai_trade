@@ -608,9 +608,43 @@ class TradingApp {
         container.innerHTML = conversations.map(conv => `
             <div class="conversation-item">
                 <div class="conversation-time">${new Date(conv.timestamp.replace(' ', 'T') + 'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</div>
-                <div class="conversation-content">${conv.ai_response}</div>
+                
+                <div class="conversation-prompt">
+                    <div class="conversation-label">
+                        <i class="bi bi-person-circle"></i> 用户提示
+                    </div>
+                    <div class="conversation-text">${this.formatConversationText(conv.user_prompt)}</div>
+                </div>
+                
+                <div class="conversation-response">
+                    <div class="conversation-label">
+                        <i class="bi bi-robot"></i> AI响应
+                    </div>
+                    <div class="conversation-text">${this.formatConversationText(conv.ai_response)}</div>
+                </div>
+                
+                ${conv.cot_trace ? `
+                    <div class="conversation-cot">
+                        <div class="conversation-label">
+                            <i class="bi bi-diagram-3"></i> 思维链
+                        </div>
+                        <div class="conversation-text">${this.formatConversationText(conv.cot_trace)}</div>
+                    </div>
+                ` : ''}
             </div>
         `).join('');
+    }
+
+    formatConversationText(text) {
+        if (!text) return '';
+        // 转义HTML特殊字符
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;')
+            .replace(/\n/g, '<br>');
     }
 
     async loadMarketPrices() {
@@ -936,25 +970,80 @@ class TradingApp {
     }
 
     startRefreshCycles() {
-        this.refreshIntervals.market = setInterval(() => {
-            this.loadMarketPrices();
-        }, 5000);
+        // 使用SSE代替定时器，不会阻塞界面
+        this.connectPriceStream();
+        this.connectPortfolioStream();
+    }
 
-        this.refreshIntervals.portfolio = setInterval(() => {
-            if (this.isAggregatedView || this.currentModelId) {
+    connectPriceStream() {
+        if (this.priceEventSource) {
+            this.priceEventSource.close();
+        }
+        
+        this.priceEventSource = new EventSource('/api/stream/prices');
+        
+        this.priceEventSource.onmessage = (event) => {
+            try {
+                const prices = JSON.parse(event.data);
+                this.updateMarketPrices(prices);
+            } catch (error) {
+                console.error('Failed to parse price data:', error);
+            }
+        };
+        
+        this.priceEventSource.onerror = (error) => {
+            console.error('Price stream error:', error);
+            this.priceEventSource.close();
+            // 重连
+            setTimeout(() => this.connectPriceStream(), 5000);
+        };
+    }
+
+    connectPortfolioStream() {
+        if (this.portfolioEventSource) {
+            this.portfolioEventSource.close();
+        }
+        
+        this.portfolioEventSource = new EventSource('/api/stream/portfolio');
+        
+        this.portfolioEventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                // 更新聚合视图或单个模型视图
                 if (this.isAggregatedView) {
-                    this.loadAggregatedData();
-                } else {
+                    this.updateAggregatedPortfolio(data.portfolio);
+                } else if (this.currentModelId) {
+                    // 单个模型视图，需要调用API获取完整数据
                     this.loadModelData();
                 }
+            } catch (error) {
+                console.error('Failed to parse portfolio data:', error);
             }
-        }, 10000);
+        };
+        
+        this.portfolioEventSource.onerror = (error) => {
+            console.error('Portfolio stream error:', error);
+            this.portfolioEventSource.close();
+            // 重连
+            setTimeout(() => this.connectPortfolioStream(), 5000);
+        };
     }
 
     stopRefreshCycles() {
+        // 停止所有定时器
         Object.values(this.refreshIntervals).forEach(interval => {
             if (interval) clearInterval(interval);
         });
+        
+        // 关闭SSE连接
+        if (this.priceEventSource) {
+            this.priceEventSource.close();
+            this.priceEventSource = null;
+        }
+        if (this.portfolioEventSource) {
+            this.portfolioEventSource.close();
+            this.portfolioEventSource = null;
+        }
     }
 
     async showSettingsModal() {

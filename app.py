@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
 import time
 import threading
@@ -13,6 +13,16 @@ from ai_trader import ConfigurableAITrader
 from database import Database
 from config_manager import get_config
 from version import __version__, __github_owner__, __repo__, GITHUB_REPO_URL, LATEST_RELEASE_URL
+
+# 加载环境变量
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("[INFO] Environment variables loaded from .env file")
+except ImportError:
+    print("[WARN] python-dotenv not installed, .env file will not be loaded")
+except Exception as e:
+    print(f"[WARN] Failed to load .env file: {e}")
 
 app = Flask(__name__)
 CORS(app)
@@ -32,8 +42,8 @@ if not app.debug:
     # 检查是否已经配置过日志处理器，避免重复添加
     file_handlers = [handler for handler in app.logger.handlers if isinstance(handler, logging.FileHandler)]
     if not file_handlers:
-        # 创建文件处理器（不使用RotatingFileHandler，而是每天一个文件）
-        file_handler = logging.FileHandler(log_filename)
+        # 创建文件处理器（显式指定UTF-8编码）
+        file_handler = logging.FileHandler(log_filename, encoding='utf-8')
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
         ))
@@ -60,7 +70,7 @@ if not app.debug:
             if not current_filename.startswith(f'app_{today}'):
                 # 日期已更改，需要创建新的日志文件
                 app.logger.removeHandler(current_handler)
-                file_handler = logging.FileHandler(log_filename)
+                file_handler = logging.FileHandler(log_filename, encoding='utf-8')
                 file_handler.setFormatter(logging.Formatter(
                     '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
                 ))
@@ -387,6 +397,114 @@ def get_market_prices():
         # 返回错误而不是使用默认值
         return jsonify({'error': 'Failed to fetch market prices'}), 500
 
+@app.route('/api/stream/prices')
+def stream_prices():
+    """SSE端点：推送实时市场价格"""
+    def generate():
+        from config_manager import get_config
+        import time
+        import json
+        
+        config = get_config()
+        coins = config.risk.monitored_coins if hasattr(config.risk, 'monitored_coins') and config.risk.monitored_coins else []
+        
+        if not coins:
+            yield f"data: {{}}\n\n"
+            return
+        
+        while True:
+            try:
+                prices = market_fetcher.get_current_prices_batch(coins)
+                data = json.dumps(prices)
+                yield f"data: {data}\n\n"
+                time.sleep(30)  # 每30秒推送一次
+            except Exception as e:
+                print(f"[ERROR] Stream prices failed: {e}")
+                time.sleep(30)
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/api/stream/portfolio')
+def stream_portfolio():
+    """SSE端点：推送投资组合数据"""
+    def generate():
+        import time
+        import json
+        from config_manager import get_config
+        
+        config = get_config()
+        coins = config.risk.monitored_coins if hasattr(config.risk, 'monitored_coins') and config.risk.monitored_coins else []
+        
+        if not coins:
+            yield f"data: {{\"portfolio\": {{}}, \"model_count\": 0}}\n\n"
+            return
+        
+        while True:
+            try:
+                prices_data = market_fetcher.get_current_prices_batch(coins)
+                current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+                
+                models = db.get_all_models()
+                total_portfolio = {
+                    'total_value': 0,
+                    'cash': 0,
+                    'positions_value': 0,
+                    'realized_pnl': 0,
+                    'unrealized_pnl': 0,
+                    'initial_capital': 0,
+                    'positions': []
+                }
+                
+                all_positions = {}
+                
+                for model in models:
+                    portfolio = db.get_portfolio(model['id'], current_prices)
+                    if portfolio:
+                        total_portfolio['total_value'] += portfolio.get('total_value', 0)
+                        total_portfolio['cash'] += portfolio.get('cash', 0)
+                        total_portfolio['positions_value'] += portfolio.get('positions_value', 0)
+                        total_portfolio['realized_pnl'] += portfolio.get('realized_pnl', 0)
+                        total_portfolio['unrealized_pnl'] += portfolio.get('unrealized_pnl', 0)
+                        total_portfolio['initial_capital'] += portfolio.get('initial_capital', 0)
+                        
+                        for pos in portfolio.get('positions', []):
+                            key = f"{pos['coin']}_{pos['side']}"
+                            if key not in all_positions:
+                                all_positions[key] = {
+                                    'coin': pos['coin'],
+                                    'side': pos['side'],
+                                    'quantity': 0,
+                                    'avg_price': 0,
+                                    'total_cost': 0,
+                                    'leverage': pos['leverage'],
+                                    'current_price': pos['current_price'],
+                                    'pnl': 0
+                                }
+                            
+                            current_pos = all_positions[key]
+                            current_cost = current_pos['quantity'] * current_pos['avg_price']
+                            new_cost = pos['quantity'] * pos['avg_price']
+                            total_quantity = current_pos['quantity'] + pos['quantity']
+                            
+                            if total_quantity > 0:
+                                current_pos['avg_price'] = (current_cost + new_cost) / total_quantity
+                                current_pos['quantity'] = total_quantity
+                                current_pos['total_cost'] = current_cost + new_cost
+                                current_pos['pnl'] = (pos['current_price'] - current_pos['avg_price']) * total_quantity
+                
+                total_portfolio['positions'] = list(all_positions.values())
+                data = json.dumps({
+                    'portfolio': total_portfolio,
+                    'model_count': len(models)
+                })
+                yield f"data: {data}\n\n"
+                time.sleep(60)  # 每60秒推送一次
+            except Exception as e:
+                print(f"[ERROR] Stream portfolio failed: {e}")
+                time.sleep(60)
+    
+    return Response(generate(), mimetype='text/event-stream')
+
 @app.route('/api/models/<int:model_id>/execute', methods=['POST'])
 def execute_trading(model_id):
     if model_id not in trading_engines:
@@ -551,6 +669,79 @@ def get_version():
         'github_repo': GITHUB_REPO_URL,
         'latest_release_url': LATEST_RELEASE_URL
     })
+
+# ============ Live Trading API Endpoints ============
+
+@app.route('/api/live/test', methods=['GET'])
+def test_live_trading():
+    """测试实盘交易服务连接"""
+    try:
+        from live_trading_service import live_trading_service
+        
+        # 检查连接状态
+        health = live_trading_service.health_check()
+        
+        # 如果连接成功，尝试获取余额
+        result = {
+            'health': health,
+            'balance': None,
+            'positions': None
+        }
+        
+        if health.get('status') == 'healthy':
+            # 获取余额
+            balance_result = live_trading_service.get_balance()
+            result['balance'] = balance_result
+            
+            # 获取持仓
+            positions_result = live_trading_service.get_positions()
+            result['positions'] = positions_result
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'message': '实盘交易服务测试失败'
+        }), 500
+
+@app.route('/api/live/balance', methods=['GET'])
+def get_live_balance():
+    """获取实盘账户余额"""
+    try:
+        from live_trading_service import live_trading_service
+        result = live_trading_service.get_balance()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/live/positions', methods=['GET'])
+def get_live_positions():
+    """获取实盘持仓"""
+    try:
+        from live_trading_service import live_trading_service
+        result = live_trading_service.get_positions()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/live/health', methods=['GET'])
+def get_live_health():
+    """获取实盘服务健康状态"""
+    try:
+        from live_trading_service import live_trading_service
+        result = live_trading_service.health_check()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 @app.route('/api/models/<int:model_id>/performance', methods=['GET'])
 def get_model_performance(model_id):
@@ -769,7 +960,10 @@ def init_trading_engines():
                         max_daily_loss=config_manager.risk.max_daily_loss,
                         max_position_size=config_manager.risk.max_position_size,
                         max_leverage=config_manager.risk.max_leverage,
-                        min_trade_size_usd=config_manager.risk.min_trade_size_usd
+                        min_trade_size_usd=config_manager.risk.min_trade_size_usd,
+                        db=db,  # 传递数据库连接用于记录对话
+                        model_id=model_id,  # 传递模型ID用于记录对话
+                        config_manager=config_manager  # 传递配置管理器
                     ),
                     config_manager=config_manager,
                     is_live=model.get('is_live', False)
