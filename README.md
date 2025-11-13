@@ -1,7 +1,9 @@
 # AI改变未来，AI量化可以赚钱，有待时间验证。投资有风险 入市需谨慎。^_^
 
 AI驱动的加密货币量化交易平台，支持本地模拟盘和OKX实盘交易。
-本项目参考了https://github.com/chadyi/AITradeGame，做了以下改进：
+本项目参考了
+https://github.com/chadyi/AITradeGame 
+做了以下改进：
 1.增加了okx实盘交易
 2.修复了一些bug，比如交易记录显示
 3.用多线程代替定时器，解决了界面渲染卡顿问题
