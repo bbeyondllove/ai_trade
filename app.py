@@ -985,6 +985,21 @@ if __name__ == '__main__':
     print("\n" + "=" * 60)
     print("AITradeGame - Enhanced Trading System")
     print("=" * 60)
+    
+    # 检查是否有.env配置，确定运行模式
+    env_configured = all([
+        os.getenv('OKX_API_KEY'),
+        os.getenv('OKX_SECRET'),
+        os.getenv('OKX_PASSWORD')
+    ])
+    
+    if env_configured:
+        print("[MODE] 实盘模式可用 - 已检测到.env配置")
+        print("[INFO] 支持模拟盘和实盘交易")
+    else:
+        print("[MODE] 模拟盘模式 - 未检测到.env配置")
+        print("[INFO] 仅支持模拟盘交易，如需实盘交易请配置.env文件")
+    
     print("[INFO] Initializing database...")
 
     db.init_db()

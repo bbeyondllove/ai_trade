@@ -85,12 +85,21 @@ class LiveTradingService:
     def _init_connection(self) -> bool:
         """初始化OKX API连接"""
         try:
+            # 情况1: 无.env配置或配置不完整
             if not all([self.api_key, self.secret_key, self.passphrase]):
-                logger.error("缺少OKX API配置，请设置环境变量: OKX_API_KEY, OKX_SECRET, OKX_PASSWORD")
+                missing = []
+                if not self.api_key: missing.append('OKX_API_KEY')
+                if not self.secret_key: missing.append('OKX_SECRET')
+                if not self.passphrase: missing.append('OKX_PASSWORD')
+                
+                logger.warning(f"缺少OKX API配置: {', '.join(missing)}")
+                logger.info("→ 自动降级为模拟盘模式")
+                logger.info("提示: 如需使用实盘交易,请在.env文件中配置完整的API密钥")
                 return False
             
             if TradeAPI is None or AccountAPI is None or PublicAPI is None:
-                logger.error("OKX SDK未正确导入")
+                logger.warning("OKX SDK未正确导入")
+                logger.info("→ 自动降级为模拟盘模式")
                 return False
             
             # 初始化API客户端
@@ -122,30 +131,43 @@ class LiveTradingService:
             
             # 测试连接
             if self.public_api is None:
-                logger.error("Public API未初始化")
+                logger.warning("Public API未初始化")
+                logger.info("→ 自动降级为模拟盘模式")
                 return False
+            
             result = self.public_api.get_system_time()
             if result and result.get('code') == '0':
                 logger.info("OKX公共API连接成功")
             else:
-                logger.error(f"OKX公共API连接失败: {result.get('msg', 'Unknown error') if result else 'Connection failed'}")
+                # 情况2: .env配置错误或网络问题
+                error_msg = result.get('msg', 'Unknown error') if result else 'Connection failed'
+                logger.warning(f"OKX公共API连接失败: {error_msg}")
+                logger.info("→ 自动降级为模拟盘模式")
                 return False
             
             # 测试认证
             if self.account_api is None:
-                logger.error("Account API未初始化")
+                logger.warning("Account API未初始化")
+                logger.info("→ 自动降级为模拟盘模式")
                 return False
+            
             result = self.account_api.get_account_balance()
             if result and result.get('code') == '0':
-                logger.info("OKX API认证成功")
+                logger.info("✓ OKX API认证成功 - 实盘模式已启用")
                 self.is_connected = True
                 return True
             else:
-                logger.error(f"OKX API认证失败: {result.get('msg', 'Unknown error') if result else 'Connection failed'}")
+                # 情况3: 实盘API认证失败(配置存在但无效)
+                error_msg = result.get('msg', 'Unknown error') if result else 'Connection failed'
+                logger.warning(f"OKX API认证失败: {error_msg}")
+                logger.warning("可能原因: API密钥错误、权限不足或密钥已过期")
+                logger.info("→ 自动降级为模拟盘模式")
                 return False
                 
         except Exception as e:
-            logger.error(f"OKX API连接初始化失败: {e}")
+            # 任何异常都降级为模拟盘模式
+            logger.warning(f"OKX API连接初始化异常: {e}")
+            logger.info("→ 自动降级为模拟盘模式")
             return False
     
     def _init_supported_symbols(self) -> bool:
@@ -641,7 +663,7 @@ class LiveTradingService:
                 if result and result.get('code') == '0':
                     return {
                         'status': 'healthy',
-                        'message': '服务正常',
+                        'message': '实盘服务正常',
                         'mode': 'live'
                     }
                 else:
@@ -651,16 +673,17 @@ class LiveTradingService:
                         'mode': 'error'
                     }
             else:
+                # 未连接时，返回模拟盘模式状态
                 return {
-                    'status': 'unhealthy',
-                    'message': '交易所连接断开',
-                    'mode': 'offline'
+                    'status': 'simulation',
+                    'message': '实盘服务未连接，仅支持模拟盘交易',
+                    'mode': 'simulation'
                 }
         except Exception as e:
             return {
-                'status': 'unhealthy',
-                'message': str(e),
-                'mode': 'error'
+                'status': 'simulation',
+                'message': f'实盘服务不可用: {str(e)}，仅支持模拟盘交易',
+                'mode': 'simulation'
             }
 
     def get_service_info(self) -> Dict:
