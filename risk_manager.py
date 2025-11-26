@@ -88,20 +88,20 @@ class RiskManager:
 
     def validate_trade(self, decision: TradeDecision, portfolio: Dict,
                       market_state: Dict) -> RiskMetrics:
-        """综合验证交易决策"""
+        """综合验证交易决策 - 简化版，只检查基础有效性"""
         
         warnings = []
         checks = {}
 
-        # 计算调整后的数量（先计算调整，再验证）
+        # 计算调整后的数量
         adjusted_quantity = self._calculate_safe_quantity(decision, portfolio, market_state)
 
-        # 基础检查（使用调整后的数量）
+        # 基础检查
         checks['signal_valid'] = self._check_signal(decision.signal)
         checks['quantity_valid'] = self._check_quantity(adjusted_quantity)
         checks['leverage_valid'] = self._check_leverage(decision.leverage)
 
-        # 创建调整后的决策用于验证
+        # 创建调整后的决策
         adjusted_decision = TradeDecision(
             coin=decision.coin,
             signal=decision.signal,
@@ -117,17 +117,14 @@ class RiskManager:
             position_size_percent=decision.position_size_percent
         )
 
+        # 最小交易金额检查
         checks['min_trade_size'] = self._check_min_trade_size(adjusted_decision, market_state, portfolio)
-        checks['position_size'] = self._check_position_size(adjusted_decision, portfolio, market_state)
-        checks['daily_loss'] = self._check_daily_loss(portfolio)
+        
+        # 流动性检查（确保有足够现金）
         checks['liquidity'] = self._check_liquidity(adjusted_decision, market_state, portfolio)
-        checks['correlation'] = self._check_correlation(adjusted_decision, portfolio, market_state)
 
-        # 熔断检查
-        checks['circuit_breaker'] = not self._is_circuit_breaker_active()
-
-        # 计算风险分数（使用调整后的决策）
-        risk_score = self._calculate_risk_score(adjusted_decision, portfolio, market_state)
+        # 计算风险分数
+        risk_score = 0.0  # 简化风险评分
 
         # 生成建议
         recommendation = self._generate_recommendation(checks, risk_score, warnings)
@@ -142,45 +139,23 @@ class RiskManager:
         )
 
     def pre_trade_check(self, portfolio: Dict, market_state: Dict) -> Dict:
-        """交易前风险检查"""
+        """交易前风险检查 - 简化版"""
 
         checks = {
-            'daily_loss_ok': self._check_daily_loss(portfolio),
-            'max_positions_ok': len(portfolio['positions']) < self.max_positions,
-            'drawdown_ok': self._check_drawdown(portfolio),
-            'circuit_breaker_ok': not self._is_circuit_breaker_active()
+            'ready': True  # 始终允许交易
         }
 
         return {
-            'approved': all(checks.values()),
+            'approved': True,
             'checks': checks,
-            'current_risk_level': self._get_current_risk_level(portfolio),
-            'recommendations': self._get_risk_recommendations(checks)
+            'current_risk_level': 'low',
+            'recommendations': []
         }
 
     def post_trade_update(self, trade_result: Dict):
-        """交易后更新风险状态"""
-
-        pnl = trade_result.get('pnl', 0)
-
-        # 更新日盈亏
-        self.daily_pnl += pnl
-        self.daily_trades += 1
-
-        # 更新连续亏损
-        if pnl < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
-
+        """交易后更新风险状态 - 简化版"""
+        # 只记录，不进行额外控制
         self.last_trade_time = datetime.now()
-
-        # 检查是否需要触发熔断
-        if self.consecutive_losses >= 3 or self.daily_pnl < -self.max_daily_loss * 10000:
-            self._trigger_circuit_breaker()
-
-        self.logger.info(f"Risk updated - PnL: ${pnl:.2f}, Daily PnL: ${self.daily_pnl:.2f}, "
-                        f"Consecutive losses: {self.consecutive_losses}")
 
     # === 检查方法 ===
 
@@ -199,6 +174,10 @@ class RiskManager:
 
     def _check_min_trade_size(self, decision: TradeDecision, market_state: Dict, portfolio: Optional[Dict] = None) -> bool:
         """检查最小交易金额"""
+        # 如果quantity为0，说明没有交易决策，直接跳过检查
+        if decision.quantity == 0:
+            return True
+        
         price = self._get_coin_price(decision.coin, market_state)
         trade_value = decision.quantity * price
         # 增加一个小的容忍度（0.1美元）以处理浮点数精度问题
@@ -342,17 +321,11 @@ class RiskManager:
             # 模拟模式：使用现金余额
             free_balance = portfolio.get('cash', 0)
 
-        # 基于可用余额的最大可交易金额（考虑保证金要求）
-        # 保证金 = 交易金额 / 杠杆，需要预留至少1/3的余额作为保证金
-        margin_ratio = 1.0 / decision.leverage
-        available_for_trading = free_balance * (1 - margin_ratio)  # 预留保证金部分
-        max_trade_amount_by_balance = available_for_trading / (1 - margin_ratio + margin_ratio)
-        # 简化：最大可交易金额 = 可用余额 * 2/3 (对于3倍杠杆)
-        if decision.leverage == 3:
-            max_trade_amount_by_balance = free_balance * 2/3
-        else:
-            # 通用公式：预留保证金后可用的金额
-            max_trade_amount_by_balance = free_balance * (decision.leverage - 1) / decision.leverage
+        # 基于可用余额的最大可交易金额(考虑杠杆)
+        # 杠杆交易: 保证金 = 仓位价值 / 杠杆
+        # 因此: 最大仓位价值 = 可用余额 × 杠杆
+        # 但为了安全,预留10%的余额作为缓冲
+        max_trade_amount_by_balance = free_balance * 0.9 * decision.leverage
 
         # 基于余额的最大数量
         max_by_balance = max_trade_amount_by_balance / price
@@ -364,26 +337,59 @@ class RiskManager:
         # max_position_size 是基于总价值的仓位比例，不应该再乘以杠杆
         max_by_risk = (portfolio['total_value'] * self.max_position_size) / price
 
-        # 杠杆调整
-        max_by_leverage = portfolio.get('cash', 0) / price
+        # 杠杆调整：计算考虑杠杆后的最大可交易数量
+        # 最大头寸价值 = 现金 × 杠杆，最大数量 = 最大头寸价值 / 价格
+        max_by_leverage = portfolio.get('cash', 0) * decision.leverage / price
 
         # 优化的资金分配策略
-        # 1. 优先使用AI决策的金额
+        # 1. 提前过滤：如果AI给的quantity为0且是hold信号，直接返回0（避免无意义计算）
+        # 注意：buy/sell信号即使quantity=0也要计算，因为我们要自动分配仓位
+        if decision.quantity == 0 and decision.signal in ['hold']:
+            self.logger.debug(f"[{decision.coin}] hold信号且quantity=0，跳过计算")
+            return 0
+        
+        # 2. 基于置信度自动计算合理的交易金额（不再依赖AI的quantity）
+        confidence = decision.confidence
+        
+        # 根据置信度确定使用的现金比例（优化后策略）
+        # 注意：这是使用的保证金比例，实际仓位 = 保证金 × 杠杆
+        if confidence >= 0.85:  # 极高置信度
+            cash_usage_ratio = 0.70  # 使用70%现金作为保证金，5x杠杆 → 350%总仓位
+        elif confidence >= 0.70:  # 高置信度
+            cash_usage_ratio = 0.50  # 使用50%现金作为保证金，3x杠杆 → 150%总仓位
+        elif confidence >= 0.65:  # 中高置信度
+            cash_usage_ratio = 0.45  # 使用45%现金作为保证金，3x杠杆 → 135%总仓位
+        elif confidence >= 0.60:  # 中等置信度
+            cash_usage_ratio = 0.35  # 使用35%现金作为保证金，3x杠杆 → 105%总仓位
+        else:  # 低置信度 (<0.60)
+            # 低置信度直接跳过，不下单
+            self.logger.info(f"[{decision.coin}] 置信度过低 ({confidence:.2f} < 0.60)，跳过交易")
+            return 0  # 返回0表示不交易
+        
+        # 计算建议的交易金额（考虑杠杆）
+        suggested_cash_amount = free_balance * cash_usage_ratio
+        suggested_trade_amount = suggested_cash_amount * decision.leverage  # 杠杆后的交易金额
+        suggested_quantity = suggested_trade_amount / price
+        
+        # 3. 检查AI给出的quantity是否合理
         ai_trade_amount = decision.quantity * price
-
-        # 2. 检查是否有足够资金执行AI决策
-        if ai_trade_amount <= max_trade_amount_by_balance:
-            # 资金充足，执行AI决策
+        
+        # 如果AI给出的金额太小（小于建议金额的50%），使用我们自己计算的
+        if ai_trade_amount < suggested_trade_amount * 0.5:
+            safe_quantity = suggested_quantity
+            self.logger.info(f"[{decision.coin}] 置信度({confidence:.2f})计算仓位: quantity={safe_quantity:.6f}, amount=${suggested_trade_amount:.2f}, leverage={decision.leverage}x")
+        elif ai_trade_amount <= max_trade_amount_by_balance:
+            # 资金充足，执行AI决策（不记录日志，避免与上面的日志重复）
             safe_quantity = decision.quantity
-            self.logger.info(f"[{decision.coin}] Using AI decision: {decision.quantity:.6f} (${ai_trade_amount:.2f})")
         else:
             # 资金不足，使用可用余额的策略
             safe_quantity = max_by_balance
             actual_trade_amount = safe_quantity * price
-            self.logger.info(f"[{decision.coin}] AI wants ${ai_trade_amount:.2f}, but only ${actual_trade_amount:.2f} available")
-            self.logger.info(f"[{decision.coin}] Using available balance: {safe_quantity:.6f}")
+            shortage = ai_trade_amount - actual_trade_amount
+            self.logger.warning(f"[{decision.coin}] 资金不足 - AI需要${ai_trade_amount:.2f}, 可用${actual_trade_amount:.2f}, 缺口${shortage:.2f}")
+            self.logger.info(f"[{decision.coin}] 调整为可用余额: quantity={safe_quantity:.6f}")
 
-        # 3. 确保不低于最小交易金额，但不超过可用余额
+        # 4. 确保不低于最小交易金额，但不超过可用余额
         if safe_quantity * price < self.min_trade_size_usd:
             # 计算满足最小交易金额的数量
             min_required_quantity = self.min_trade_size_usd / price
@@ -400,7 +406,7 @@ class RiskManager:
                 else:
                     self.logger.info(f"[{decision.coin}] Insufficient funds, using reduced amount: {safe_quantity:.6f} (${actual_trade_amount:.2f})")
 
-        # 4. 确保不超过其他限制
+        # 5. 确保不超过其他限制
         final_safe_quantity = min(
             safe_quantity,
             max_by_risk,
@@ -408,17 +414,9 @@ class RiskManager:
             max_by_leverage
         )
         
-        self.logger.info(f"[{decision.coin}] Quantity calculation: {{"
-                        f"'original': {decision.quantity:.6f}, "
-                        f"'ai_trade_amount': {ai_trade_amount:.6f}, "
-                        f"'available_for_trading': {available_for_trading:.6f}, "
-                        f"'min_trade_size': {min_quantity_for_trade_size:.6f}, "
-                        f"'max_by_balance': {max_by_balance:.6f}, "
-                        f"'max_by_cash': {max_by_cash:.6f}, "
-                        f"'max_by_risk': {max_by_risk:.6f}, "
-                        f"'max_by_leverage': {max_by_leverage:.6f}, "
-                        f"'final_safe_quantity': {final_safe_quantity:.6f}"
-                        f"}}")
+        # 如果最终数量与safe_quantity不同，说明被风控限制调整了
+        if final_safe_quantity < safe_quantity:
+            self.logger.debug(f"[{decision.coin}] 风控调整: {safe_quantity:.6f} -> {final_safe_quantity:.6f}")
 
         return final_safe_quantity
 

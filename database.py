@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 class Database:
     def __init__(self, db_path: str = 'AITradeGame.db'):
         self.db_path = db_path
+        self._live_connection_failed = {}  # 跟踪每个模型的实盘连接失败状态 {model_id: True/False}
         
     def get_connection(self):
         """Get database connection"""
@@ -153,7 +154,7 @@ class Database:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trading_frequency_minutes INTEGER DEFAULT 60,
+                trading_frequency_minutes INTEGER DEFAULT 5,
                 trading_fee_rate REAL DEFAULT 0.001,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -165,7 +166,7 @@ class Database:
         if cursor.fetchone()[0] == 0:
             cursor.execute('''
                 INSERT INTO settings (trading_frequency_minutes, trading_fee_rate)
-                VALUES (60, 0.001)
+                VALUES (5, 0.001)
             ''')
 
         conn.commit()
@@ -251,7 +252,13 @@ class Database:
                 # 获取实盘余额
                 live_balance_result = live_trading_service.get_balance()
                 if not live_balance_result.get('success'):
-                    print(f"[WARN] Failed to get live balance for model {model_id}: {live_balance_result.get('error', 'Unknown error')}")
+                    error_msg = live_balance_result.get('error', 'Unknown error')
+                    # 只在状态改变时提示（首次失败或重连失败）
+                    if not self._live_connection_failed.get(model_id, False):
+                        print(f"[WARN] 实盘交易服务未连接 (模型 {model_id}): {error_msg}")
+                        self._live_connection_failed[model_id] = True
+                    
+                    # 实盘连接失败，返回错误状态，不处理
                     conn.close()
                     return {
                         'model_id': model_id,
@@ -265,13 +272,19 @@ class Database:
                         'unrealized_pnl': 0,
                         'is_live': True,
                         'initial_capital': initial_capital,
-                        'error': f"实盘API调用失败: {live_balance_result.get('error', 'Unknown error')}"
+                        'error': f"实盘API调用失败: {error_msg}"
                     }
 
                 # 获取实盘持仓
                 live_positions_result = live_trading_service.get_positions()
                 if not live_positions_result.get('success'):
-                    print(f"[WARN] Failed to get live positions for model {model_id}: {live_positions_result.get('error', 'Unknown error')}")
+                    error_msg = live_positions_result.get('error', 'Unknown error')
+                    # 只在状态改变时提示
+                    if not self._live_connection_failed.get(model_id, False):
+                        print(f"[WARN] 实盘交易服务未连接 (模型 {model_id}): {error_msg}")
+                        self._live_connection_failed[model_id] = True
+                    
+                    # 实盘连接失败，返回错误状态，不处理
                     conn.close()
                     return {
                         'model_id': model_id,
@@ -285,7 +298,7 @@ class Database:
                         'unrealized_pnl': 0,
                         'is_live': True,
                         'initial_capital': initial_capital,
-                        'error': f"获取实盘持仓失败: {live_positions_result.get('error', 'Unknown error')}"
+                        'error': f"获取实盘持仓失败: {error_msg}"
                     }
 
                 # 解析实盘余额
@@ -359,6 +372,11 @@ class Database:
                 ''', (model_id,))
                 realized_pnl = cursor.fetchone()['total_pnl']
 
+                # 实盘连接成功，重置失败状态
+                if self._live_connection_failed.get(model_id, False):
+                    print(f"[INFO] 实盘交易服务已重新连接 (模型 {model_id})")
+                    self._live_connection_failed[model_id] = False
+                
                 portfolio_data = {
                     'model_id': model_id,
                     'cash': cash,  # 总余额（账户总值）
@@ -377,9 +395,14 @@ class Database:
                 return portfolio_data
 
             except Exception as e:
-                print(f"[ERROR] Error getting live data for model {model_id}: {e}")
-                import traceback
-                traceback.print_exc()
+                # 只在状态改变时提示异常
+                if not self._live_connection_failed.get(model_id, False):
+                    print(f"[ERROR] 获取实盘数据异常 (模型 {model_id}): {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self._live_connection_failed[model_id] = True
+                
+                # 实盘连接异常，返回错误状态，不处理
                 conn.close()
                 return {
                     'model_id': model_id,
@@ -491,12 +514,18 @@ class Database:
         conn.close()
     
     def get_trades(self, model_id: int, limit: int = 50) -> List[Dict]:
-        """Get trade history"""
+        """Get trade history with model info (including is_live status)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT * FROM trades WHERE model_id = ?
-            ORDER BY timestamp DESC LIMIT ?
+            SELECT 
+                t.*,
+                m.is_live,
+                m.name as model_name
+            FROM trades t
+            LEFT JOIN models m ON t.model_id = m.id
+            WHERE t.model_id = ?
+            ORDER BY t.timestamp DESC LIMIT ?
         ''', (model_id, limit))
         rows = cursor.fetchall()
         conn.close()
@@ -663,7 +692,7 @@ class Database:
         else:
             # Return default settings if none exist
             return {
-                'trading_frequency_minutes': 60,
+                'trading_frequency_minutes': 5,
                 'trading_fee_rate': 0.001
             }
 

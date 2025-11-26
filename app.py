@@ -8,11 +8,28 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from trading_engine import EnhancedTradingEngine
-from async_market_data import get_async_market_fetcher
+from websocket_server import ws_manager, WebSocketChannel
+from websocket_services import ws_service_manager
+from market_data_service import get_async_market_fetcher
 from ai_trader import ConfigurableAITrader
 from database import Database
 from config_manager import get_config
 from version import __version__, __github_owner__, __repo__, GITHUB_REPO_URL, LATEST_RELEASE_URL
+from event_bus import get_event_bus
+from event_listeners import initialize_event_listeners
+from app_utils import (
+    validate_json_request,
+    error_response,
+    success_response,
+    get_monitored_coins_from_config,
+    create_trading_engine,
+    get_current_market_prices,
+    fetch_provider_models_from_api
+)
+import urllib3
+# Disable SSL warnings and configure connection pool
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 # 加载环境变量
 try:
@@ -47,21 +64,24 @@ if not app.debug:
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
         ))
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.INFO)
         
         # 配置根日志记录器
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
+        root_logger.setLevel(logging.INFO)
         root_logger.addHandler(file_handler)
+        
+        # 禁用httpx的详细日志
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
         
         # 确保Flask的logger也使用相同的处理器
         app.logger.addHandler(file_handler)
-        app.logger.setLevel(logging.DEBUG)
+        app.logger.setLevel(logging.INFO)
         app.logger.propagate = False
         
         # 添加启动日志
         app.logger.info('AITradeGame startup')
-        app.logger.debug('日志系统初始化完成')
     else:
         # 如果已经存在FileHandler，检查是否需要更新到今天的文件
         current_handler = file_handlers[0]
@@ -74,10 +94,14 @@ if not app.debug:
                 file_handler.setFormatter(logging.Formatter(
                     '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
                 ))
-                file_handler.setLevel(logging.DEBUG)
+                file_handler.setLevel(logging.INFO)
                 
                 root_logger = logging.getLogger()
                 root_logger.addHandler(file_handler)
+                
+                # 禁用httpx的详细日志
+                logging.getLogger("httpx").setLevel(logging.WARNING)
+                logging.getLogger("httpcore").setLevel(logging.WARNING)
                 
                 app.logger.addHandler(file_handler)
                 app.logger.info('AITradeGame startup - new day log file')
@@ -92,6 +116,74 @@ auto_trading = True
 # 获取配置管理器
 config_manager = get_config()
 TRADE_FEE_RATE = config_manager.trading.fee_rate
+
+# 初始化事件总线
+event_bus = get_event_bus()
+
+# 初始化事件监听器将在WebSocket服务启动后进行
+event_listeners = {}
+
+# Initialize WebSocket services
+async def initialize_websocket_services():
+    """Initialize WebSocket services with dependencies"""
+    try:
+        # 设置外部依赖
+        ws_service_manager.initialize(db, market_fetcher, trading_engines, config_manager)
+        print("[INFO] WebSocket service manager initialized")
+        
+        # 初始化事件监听器
+        global event_listeners
+        from performance_service import get_performance_monitor
+        event_listeners = initialize_event_listeners(
+            ws_manager=ws_manager,
+            performance_monitor=get_performance_monitor(),
+            db=db
+        )
+        print("[INFO] Event listeners initialized")
+        
+        # 等待一下，确保所有依赖都就绪
+        await asyncio.sleep(config_manager.timing.websocket_restart_delay_seconds / 2)
+        
+        # 先启动所有服务，然后启动WebSocket服务器（它会阻塞）
+        print("[INFO] Starting WebSocket data services...")
+        await ws_service_manager.start_all_services()
+        print("[INFO] WebSocket data services started")
+        
+        # 再等待一下，让数据服务完全启动
+        await asyncio.sleep(config_manager.timing.websocket_restart_delay_seconds)
+        
+        # 最后启动WebSocket服务器（这会阻塞直到服务器停止）
+        print("[INFO] Starting WebSocket server...")
+        await ws_manager.start_server()
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize WebSocket services: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Start WebSocket server in background thread
+def start_websocket_server_thread():
+    """Start WebSocket server in background thread"""
+    import asyncio
+    import nest_asyncio
+
+    # Apply nest_asyncio to allow asyncio in thread
+    nest_asyncio.apply()
+
+    def run_websocket_server():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(initialize_websocket_services())
+            loop.run_forever()
+        except Exception as e:
+            print(f"[ERROR] WebSocket server error: {e}")
+        finally:
+            loop.close()
+
+    ws_thread = threading.Thread(target=run_websocket_server, daemon=True)
+    ws_thread.start()
+    
+    return ws_thread
 
 @app.route('/')
 def index():
@@ -109,8 +201,10 @@ def get_providers():
 def add_provider():
     """Add new API provider"""
     data = request.json
-    if data is None:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    is_valid, err_response = validate_json_request(data)
+    if not is_valid:
+        return err_response
+    
     try:
         provider_id = db.add_provider(
             name=data['name'],
@@ -120,7 +214,7 @@ def add_provider():
         )
         return jsonify({'id': provider_id, 'message': 'Provider added successfully'})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/providers/<int:provider_id>', methods=['DELETE'])
 def delete_provider(provider_id):
@@ -129,52 +223,24 @@ def delete_provider(provider_id):
         db.delete_provider(provider_id)
         return jsonify({'message': 'Provider deleted successfully'})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/providers/models', methods=['POST'])
 def fetch_provider_models():
     """Fetch available models from provider's API"""
     data = request.json
-    if data is None:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    is_valid, err_response = validate_json_request(data)
+    if not is_valid:
+        return err_response
+    
     api_url = data.get('api_url')
     api_key = data.get('api_key')
-
+    
     if not api_url or not api_key:
         return jsonify({'error': 'API URL and key are required'}), 400
-
+    
     try:
-        # This is a placeholder - implement actual API call based on provider
-        # For now, return empty list or common models
-        models = []
-
-        # Try to detect provider type and call appropriate API
-        if 'openai.com' in api_url.lower():
-            # OpenAI API call
-            import requests
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            }
-            response = requests.get(f'{api_url}/models', headers=headers, timeout=10)
-            if response.status_code == 200:
-                result = response.json()
-                models = [m['id'] for m in result.get('data', []) if 'gpt' in m['id'].lower()]
-        elif 'deepseek' in api_url.lower():
-            # DeepSeek API
-            import requests
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            }
-            response = requests.get(f'{api_url}/models', headers=headers, timeout=10)
-            if response.status_code == 200:
-                result = response.json()
-                models = [m['id'] for m in result.get('data', [])]
-        else:
-            # Default: return common model names
-            models = ['gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo']
-
+        models = fetch_provider_models_from_api(api_url, api_key, config_manager)
         return jsonify({'models': models})
     except Exception as e:
         print(f"[ERROR] Fetch models failed: {e}")
@@ -190,14 +256,12 @@ def get_models():
 @app.route('/api/models', methods=['POST'])
 def add_model():
     data = request.json
-    if data is None:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    is_valid, err_response = validate_json_request(data)
+    if not is_valid:
+        return err_response
+    
     try:
-        # Get provider info
-        provider = db.get_provider(data['provider_id'])
-        if not provider:
-            return jsonify({'error': 'Provider not found'}), 404
-
+        # 添加模型到数据库
         model_id = db.add_model(
             name=data['name'],
             provider_id=data['provider_id'],
@@ -205,44 +269,23 @@ def add_model():
             initial_capital=float(data.get('initial_capital', 100000)),
             is_live=bool(data.get('is_live', False))
         )
-
-        model = db.get_model(model_id)
         
-        # Get provider info
-        if model is None:
-            return jsonify({'error': 'Failed to create model'}), 500
-            
-        provider = db.get_provider(model['provider_id'])
-        if not provider:
-            return jsonify({'error': 'Provider not found'}), 404
-        
-        trading_engines[model_id] = EnhancedTradingEngine(
+        # 创建交易引擎
+        trading_engines[model_id] = create_trading_engine(
             model_id=model_id,
             db=db,
             market_fetcher=market_fetcher,
-            ai_trader=ConfigurableAITrader(
-                provider_type=provider['provider_type'],
-                api_key=provider['api_key'],
-                api_url=provider['api_url'],
-                model_name=model['model_name'],
-                max_daily_loss=config_manager.risk.max_daily_loss,
-                max_position_size=config_manager.risk.max_position_size,
-                max_leverage=config_manager.risk.max_leverage,
-                min_trade_size_usd=config_manager.risk.min_trade_size_usd,
-                db=db,  # 传递数据库连接用于记录对话
-                model_id=model_id,  # 传递模型ID用于记录对话
-                config_manager=config_manager  # 传递配置管理器
-            ),
-            config_manager=config_manager,
-            is_live=model.get('is_live', False)
+            config_manager=config_manager
         )
-        print(f"[INFO] Model {model_id} ({data['name']}) initialized")
-
+        print(f"[INFO] Model {model_id} initialized")
+        
         return jsonify({'id': model_id, 'message': 'Model added successfully'})
-
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
     except Exception as e:
         print(f"[ERROR] Failed to add model: {e}")
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/models/<int:model_id>', methods=['DELETE'])
 def delete_model(model_id):
@@ -250,44 +293,81 @@ def delete_model(model_id):
         model = db.get_model(model_id)
         model_name = model['name'] if model else f"ID-{model_id}"
         
+        # 删除数据库记录
         db.delete_model(model_id)
+        
+        # 清理交易引擎资源
         if model_id in trading_engines:
-            del trading_engines[model_id]
+            try:
+                # 调用cleanup方法清理资源
+                if hasattr(trading_engines[model_id], 'cleanup'):
+                    trading_engines[model_id].cleanup()
+            except Exception as cleanup_error:
+                print(f"[WARN] Cleanup error for model {model_id}: {cleanup_error}")
+            finally:
+                # 删除引擎引用
+                del trading_engines[model_id]
         
         print(f"[INFO] Model {model_id} ({model_name}) deleted")
         return jsonify({'message': 'Model deleted successfully'})
     except Exception as e:
         print(f"[ERROR] Delete model {model_id} failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/models/<int:model_id>/portfolio', methods=['GET'])
 def get_portfolio(model_id):
     try:
         # 从配置管理器获取币种列表
-        from config_manager import get_config
-        config = get_config()
-        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
-            return jsonify({'error': 'No monitored coins configured'}), 500
-        coins = config.risk.monitored_coins
-        prices_data = market_fetcher.get_current_prices_batch(coins)
-        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
-
+        current_prices = get_current_market_prices(market_fetcher)
+        
         portfolio = db.get_portfolio(model_id, current_prices)
-        account_value = db.get_account_value_history(model_id, limit=100)
-
+        account_value = db.get_account_value_history(
+            model_id, 
+            limit=config_manager.limits.account_value_history_limit
+        )
+        
         return jsonify({
             'portfolio': portfolio,
             'account_value_history': account_value
         })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         print(f"[ERROR] Portfolio fetch failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/models/<int:model_id>/trades', methods=['GET'])
 def get_trades(model_id):
     limit = request.args.get('limit', 50, type=int)
     trades = db.get_trades(model_id, limit=limit)
     return jsonify(trades)
+
+@app.route('/api/trades', methods=['GET'])
+def get_all_trades():
+    """Get all trades from all models"""
+    limit = request.args.get('limit', 100, type=int)
+    try:
+        # 获取所有活跃模型
+        models = db.get_active_models()
+        all_trades = []
+        
+        for model in models:
+            model_id = model['id']
+            model_trades = db.get_trades(model_id, limit=limit)
+            # 为每个交易添加模型信息
+            for trade in model_trades:
+                trade['model_id'] = model_id
+                trade['model_name'] = model.get('name', 'Unknown')
+            all_trades.extend(model_trades)
+        
+        # 按时间排序并限制总数
+        all_trades.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        all_trades = all_trades[:limit]
+        
+        return jsonify(all_trades)
+    except Exception as e:
+        print(f"[ERROR] Fetch all trades failed: {e}")
+        return error_response(e)
 
 @app.route('/api/models/<int:model_id>/conversations', methods=['GET'])
 def get_conversations(model_id):
@@ -299,17 +379,12 @@ def get_conversations(model_id):
 def get_aggregated_portfolio():
     """Get aggregated portfolio data across all models"""
     try:
-        # 从配置管理器获取币种列表
-        from config_manager import get_config
-        config = get_config()
-        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
-            return jsonify({'error': 'No monitored coins configured'}), 500
-        coins = config.risk.monitored_coins
-        prices_data = market_fetcher.get_current_prices_batch(coins)
-        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+        # 获取市场价格
+        current_prices = get_current_market_prices(market_fetcher)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         print(f"[ERROR] Aggregated portfolio fetch failed: {e}")
-        # 返回错误而不是使用默认值
         return jsonify({'error': 'Failed to fetch market data'}), 500
 
     # Get aggregated data
@@ -329,6 +404,15 @@ def get_aggregated_portfolio():
     for model in models:
         portfolio = db.get_portfolio(model['id'], current_prices)
         if portfolio:
+            # 检查是否有错误（实盘API调用失败的情况）
+            if 'error' in portfolio:
+                print(f"[WARN] 聚合视图跳过模型 {model['id']} ({model.get('name', 'Unknown')}): {portfolio['error']}")
+                continue  # 跳过有错误的模型，不累加其数据
+            
+            print(f"[DEBUG] 聚合模型 {model['id']} ({model.get('name', 'Unknown')}): "
+                  f"total_value=${portfolio.get('total_value', 0):.2f}, "
+                  f"is_live={portfolio.get('is_live', False)}")
+            
             total_portfolio['total_value'] += portfolio.get('total_value', 0)
             total_portfolio['cash'] += portfolio.get('cash', 0)
             total_portfolio['positions_value'] += portfolio.get('positions_value', 0)
@@ -361,12 +445,19 @@ def get_aggregated_portfolio():
                     current_pos['avg_price'] = (current_cost + new_cost) / total_quantity
                     current_pos['quantity'] = total_quantity
                     current_pos['total_cost'] = current_cost + new_cost
-                    current_pos['pnl'] = (pos['current_price'] - current_pos['avg_price']) * total_quantity
+                    # 确保 current_price 不为 None
+                    current_price = pos.get('current_price')
+                    if current_price is not None and current_pos['avg_price'] is not None:
+                        current_pos['pnl'] = (current_price - current_pos['avg_price']) * total_quantity
+                    else:
+                        current_pos['pnl'] = 0
 
     total_portfolio['positions'] = list(all_positions.values())
 
     # Get multi-model chart data
-    chart_data = db.get_multi_model_chart_data(limit=100)
+    chart_data = db.get_multi_model_chart_data(
+        limit=config_manager.limits.chart_data_limit
+    )
 
     return jsonify({
         'portfolio': total_portfolio,
@@ -383,166 +474,54 @@ def get_models_chart_data():
 
 @app.route('/api/market/prices', methods=['GET'])
 def get_market_prices():
-    # 从配置管理器获取币种列表
-    from config_manager import get_config
-    config = get_config()
-    if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
-        return jsonify({'error': 'No monitored coins configured'}), 500
-    coins = config.risk.monitored_coins
     try:
-        prices = market_fetcher.get_current_prices_batch(coins)
-        return jsonify(prices)
+        prices = get_current_market_prices(market_fetcher)
+        # 需要返回完整的prices_data格式
+        coins = get_monitored_coins_from_config()
+        prices_data = market_fetcher.get_current_prices_batch(coins)
+        return jsonify(prices_data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         print(f"[ERROR] Market prices fetch failed: {e}")
-        # 返回错误而不是使用默认值
         return jsonify({'error': 'Failed to fetch market prices'}), 500
 
-@app.route('/api/stream/prices')
-def stream_prices():
-    """SSE端点：推送实时市场价格"""
-    def generate():
-        from config_manager import get_config
-        import time
-        import json
-        
-        config = get_config()
-        coins = config.risk.monitored_coins if hasattr(config.risk, 'monitored_coins') and config.risk.monitored_coins else []
-        
-        if not coins:
-            yield f"data: {{}}\n\n"
-            return
-        
-        while True:
-            try:
-                prices = market_fetcher.get_current_prices_batch(coins)
-                data = json.dumps(prices)
-                yield f"data: {data}\n\n"
-                time.sleep(30)  # 每30秒推送一次
-            except Exception as e:
-                print(f"[ERROR] Stream prices failed: {e}")
-                time.sleep(30)
+@app.route('/api/websocket/info', methods=['GET'])
+def get_websocket_info():
+    """Get WebSocket connection information for frontend"""
+    # 使用请求的host，但替换端口为配置的WebSocket端口
+    # 如果是远程访问，自动使用远程服务器地址
+    host = request.host.split(':')[0]  # 获取域名或IP，去掉端口
+    websocket_url = f"ws://{host}:{config_manager.server.websocket_port}"
     
-    return Response(generate(), mimetype='text/event-stream')
-
-@app.route('/api/stream/portfolio')
-def stream_portfolio():
-    """SSE端点：推送投资组合数据"""
-    def generate():
-        import time
-        import json
-        from config_manager import get_config
-        
-        config = get_config()
-        coins = config.risk.monitored_coins if hasattr(config.risk, 'monitored_coins') and config.risk.monitored_coins else []
-        
-        if not coins:
-            yield f"data: {{\"portfolio\": {{}}, \"model_count\": 0}}\n\n"
-            return
-        
-        while True:
-            try:
-                prices_data = market_fetcher.get_current_prices_batch(coins)
-                current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
-                
-                models = db.get_all_models()
-                total_portfolio = {
-                    'total_value': 0,
-                    'cash': 0,
-                    'positions_value': 0,
-                    'realized_pnl': 0,
-                    'unrealized_pnl': 0,
-                    'initial_capital': 0,
-                    'positions': []
-                }
-                
-                all_positions = {}
-                
-                for model in models:
-                    portfolio = db.get_portfolio(model['id'], current_prices)
-                    if portfolio:
-                        total_portfolio['total_value'] += portfolio.get('total_value', 0)
-                        total_portfolio['cash'] += portfolio.get('cash', 0)
-                        total_portfolio['positions_value'] += portfolio.get('positions_value', 0)
-                        total_portfolio['realized_pnl'] += portfolio.get('realized_pnl', 0)
-                        total_portfolio['unrealized_pnl'] += portfolio.get('unrealized_pnl', 0)
-                        total_portfolio['initial_capital'] += portfolio.get('initial_capital', 0)
-                        
-                        for pos in portfolio.get('positions', []):
-                            key = f"{pos['coin']}_{pos['side']}"
-                            if key not in all_positions:
-                                all_positions[key] = {
-                                    'coin': pos['coin'],
-                                    'side': pos['side'],
-                                    'quantity': 0,
-                                    'avg_price': 0,
-                                    'total_cost': 0,
-                                    'leverage': pos['leverage'],
-                                    'current_price': pos['current_price'],
-                                    'pnl': 0
-                                }
-                            
-                            current_pos = all_positions[key]
-                            current_cost = current_pos['quantity'] * current_pos['avg_price']
-                            new_cost = pos['quantity'] * pos['avg_price']
-                            total_quantity = current_pos['quantity'] + pos['quantity']
-                            
-                            if total_quantity > 0:
-                                current_pos['avg_price'] = (current_cost + new_cost) / total_quantity
-                                current_pos['quantity'] = total_quantity
-                                current_pos['total_cost'] = current_cost + new_cost
-                                current_pos['pnl'] = (pos['current_price'] - current_pos['avg_price']) * total_quantity
-                
-                total_portfolio['positions'] = list(all_positions.values())
-                data = json.dumps({
-                    'portfolio': total_portfolio,
-                    'model_count': len(models)
-                })
-                yield f"data: {data}\n\n"
-                time.sleep(60)  # 每60秒推送一次
-            except Exception as e:
-                print(f"[ERROR] Stream portfolio failed: {e}")
-                time.sleep(60)
-    
-    return Response(generate(), mimetype='text/event-stream')
+    return jsonify({
+        'websocket_url': websocket_url,
+        'available_channels': [channel.value for channel in WebSocketChannel],
+        'status': 'running' if ws_manager.running else 'stopped',
+        'connected_clients': len(ws_manager.clients)
+    })
 
 @app.route('/api/models/<int:model_id>/execute', methods=['POST'])
 def execute_trading(model_id):
     if model_id not in trading_engines:
-        model = db.get_model(model_id)
-        if not model:
-            return jsonify({'error': 'Model not found'}), 404
-
-        # Get provider info
-        provider = db.get_provider(model['provider_id'])
-        if not provider:
-            return jsonify({'error': 'Provider not found'}), 404
-
-        trading_engines[model_id] = EnhancedTradingEngine(
-            model_id=model_id,
-            db=db,
-            market_fetcher=market_fetcher,
-            ai_trader=ConfigurableAITrader(
-                provider_type=provider['provider_type'],
-                api_key=provider['api_key'],
-                api_url=provider['api_url'],
-                model_name=model['model_name'],
-                max_daily_loss=config_manager.risk.max_daily_loss,
-                max_position_size=config_manager.risk.max_position_size,
-                max_leverage=config_manager.risk.max_leverage,
-                min_trade_size_usd=config_manager.risk.min_trade_size_usd,
-                db=db,  # 传递数据库连接用于记录对话
-                model_id=model_id,  # 传递模型ID用于记录对话
-                config_manager=config_manager  # 传递配置管理器
-            ),
-            config_manager=config_manager,
-            is_live=model.get('is_live', False)
-        )
+        try:
+            # 创建交易引擎
+            trading_engines[model_id] = create_trading_engine(
+                model_id=model_id,
+                db=db,
+                market_fetcher=market_fetcher,
+                config_manager=config_manager
+            )
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 404
+        except Exception as e:
+            return error_response(e)
     
     try:
         result = trading_engines[model_id].execute_trading_cycle()
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 def trading_loop():
     app.logger.info("[INFO] Trading loop started")
@@ -550,8 +529,12 @@ def trading_loop():
     while auto_trading:
         try:
             if not trading_engines:
-                time.sleep(30)
+                time.sleep(config_manager.timing.idle_wait_seconds)
                 continue
+            
+            # 从数据库获取用户设置的交易频率
+            settings = db.get_settings()
+            trading_interval_seconds = settings.get('trading_frequency_minutes', 5) * 60
             
             app.logger.info(f"\n{'='*60}")
             app.logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -583,16 +566,17 @@ def trading_loop():
                     continue
             
             app.logger.info(f"\n{'='*60}")
-            app.logger.info(f"[SLEEP] Waiting 3 minutes for next cycle")
+            app.logger.info(f"[SLEEP] Waiting {trading_interval_seconds // 60} minutes for next cycle")
             app.logger.info(f"{'='*60}\n")
             
-            time.sleep(180)
+            time.sleep(trading_interval_seconds)
             
         except Exception as e:
             app.logger.error(f"Trading loop error: {e}")
             import traceback
             app.logger.error(traceback.format_exc())
-            time.sleep(180)  # 出错时也等待一段时间再继续
+            # 出错时使用默认间隔时间
+            time.sleep(config_manager.timing.idle_wait_seconds)
     
     app.logger.info("[INFO] Trading loop stopped")
 
@@ -600,21 +584,16 @@ def trading_loop():
 def get_leaderboard():
     """Get leaderboard data"""
     try:
-        # 从配置管理器获取币种列表
-        from config_manager import get_config
-        config = get_config()
-        if not hasattr(config.risk, 'monitored_coins') or not config.risk.monitored_coins:
-            return jsonify({'error': 'No monitored coins configured'}), 500
-        coins = config.risk.monitored_coins
+        # 获取市场价格
+        current_prices = get_current_market_prices(market_fetcher)
         
+        # 获取所有模型
         models = db.get_all_models()
         leaderboard = []
-
-        prices_data = market_fetcher.get_current_prices_batch(coins)
-        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         print(f"[ERROR] Leaderboard fetch failed: {e}")
-        # 返回错误而不是使用默认值
         return jsonify({'error': 'Failed to fetch leaderboard data'}), 500
     
     for model in models:
@@ -640,26 +619,28 @@ def get_settings():
         settings = db.get_settings()
         return jsonify(settings)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/settings', methods=['PUT'])
 def update_settings():
     """Update system settings"""
     try:
         data = request.json
-        if data is None:
-            return jsonify({'error': 'No JSON data provided'}), 400
+        is_valid, err_response = validate_json_request(data)
+        if not is_valid:
+            return err_response
+        
         trading_frequency_minutes = int(data.get('trading_frequency_minutes', 60))
         trading_fee_rate = float(data.get('trading_fee_rate', 0.001))
-
+        
         success = db.update_settings(trading_frequency_minutes, trading_fee_rate)
-
+        
         if success:
             return jsonify({'success': True, 'message': 'Settings updated successfully'})
         else:
             return jsonify({'success': False, 'error': 'Failed to update settings'}), 500
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/version', methods=['GET'])
 def get_version():
@@ -747,12 +728,12 @@ def get_live_health():
 def get_model_performance(model_id):
     """Get performance report for a specific model"""
     try:
-        from performance_monitor import get_performance_monitor
+        from performance_service import get_performance_monitor
         monitor = get_performance_monitor()
-
+        
         days = request.args.get('days', 30, type=int)
         report = monitor.get_performance_report(model_id, days=days)
-
+        
         return jsonify({
             'success': True,
             'report': {
@@ -772,20 +753,20 @@ def get_model_performance(model_id):
         })
     except Exception as e:
         print(f"[ERROR] Performance report fetch failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/system/health', methods=['GET'])
 def get_system_health():
     """Get system health status"""
     try:
-        from performance_monitor import get_performance_monitor
+        from performance_service import get_performance_monitor
         monitor = get_performance_monitor()
-
+        
         health = monitor.get_system_health()
-
+        
         # 添加市场数据缓存统计
         cache_stats = market_fetcher.get_cache_stats()
-
+        
         return jsonify({
             'success': True,
             'health': {
@@ -798,7 +779,7 @@ def get_system_health():
         })
     except Exception as e:
         print(f"[ERROR] System health check failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/config', methods=['GET'])
 def get_system_config():
@@ -833,7 +814,7 @@ def get_system_config():
         })
     except Exception as e:
         print(f"[ERROR] Config fetch failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        return error_response(e)
 
 @app.route('/api/check-update', methods=['GET'])
 def check_update():
@@ -852,33 +833,36 @@ def check_update():
             response = requests.get(
                 f"https://api.github.com/repos/{__github_owner__}/{__repo__}/releases/latest",
                 headers=headers,
-                timeout=5
+                timeout=config_manager.timing.github_api_timeout_seconds
             )
 
-            if response.status_code == 200:
-                release_data = response.json()
-                latest_version = release_data.get('tag_name', '').lstrip('v')
-                release_url = release_data.get('html_url', '')
-                release_notes = release_data.get('body', '')
+            try:
+                if response.status_code == 200:
+                    release_data = response.json()
+                    latest_version = release_data.get('tag_name', '').lstrip('v')
+                    release_url = release_data.get('html_url', '')
+                    release_notes = release_data.get('body', '')
 
-                # Compare versions
-                is_update_available = compare_versions(latest_version, __version__) > 0
+                    # Compare versions
+                    is_update_available = compare_versions(latest_version, __version__) > 0
 
-                return jsonify({
-                    'update_available': is_update_available,
-                    'current_version': __version__,
-                    'latest_version': latest_version,
-                    'release_url': release_url,
-                    'release_notes': release_notes,
-                    'repo_url': GITHUB_REPO_URL
-                })
-            else:
-                # If API fails, still return current version info
-                return jsonify({
-                    'update_available': False,
-                    'current_version': __version__,
-                    'error': 'Could not check for updates'
-                })
+                    return jsonify({
+                        'update_available': is_update_available,
+                        'current_version': __version__,
+                        'latest_version': latest_version,
+                        'release_url': release_url,
+                        'release_notes': release_notes,
+                        'repo_url': GITHUB_REPO_URL
+                    })
+                else:
+                    # If API fails, still return current version info
+                    return jsonify({
+                        'update_available': False,
+                        'current_version': __version__,
+                        'error': 'Could not check for updates'
+                    })
+            finally:
+                response.close()  # 确保关闭连接
         except Exception as e:
             print(f"[WARN] GitHub API error: {e}")
             return jsonify({
@@ -928,53 +912,31 @@ def compare_versions(version1, version2):
 def init_trading_engines():
     try:
         models = db.get_all_models()
-
+        
         if not models:
             print("[WARN] No trading models found")
             return
-
+        
         print(f"\n[INIT] Initializing trading engines...")
         for model in models:
             model_id = model['id']
             model_name = model['name']
-
+            
             try:
-                # Get provider info
-                provider = db.get_provider(model['provider_id'])
-                if not provider:
-                    print(f"  [WARN] Model {model_id} ({model_name}): Provider not found")
-                    continue
-
-                print(f"  [DEBUG] Provider info for model {model_id}: {provider}")
-                print(f"  [DEBUG] Model info: {model}")
-
-                trading_engines[model_id] = EnhancedTradingEngine(
+                # 使用工具函数创建交易引擎
+                trading_engines[model_id] = create_trading_engine(
                     model_id=model_id,
                     db=db,
                     market_fetcher=market_fetcher,
-                    ai_trader=ConfigurableAITrader(
-                        provider_type=provider['provider_type'],
-                        api_key=provider['api_key'],
-                        api_url=provider['api_url'],
-                        model_name=model['model_name'],
-                        max_daily_loss=config_manager.risk.max_daily_loss,
-                        max_position_size=config_manager.risk.max_position_size,
-                        max_leverage=config_manager.risk.max_leverage,
-                        min_trade_size_usd=config_manager.risk.min_trade_size_usd,
-                        db=db,  # 传递数据库连接用于记录对话
-                        model_id=model_id,  # 传递模型ID用于记录对话
-                        config_manager=config_manager  # 传递配置管理器
-                    ),
-                    config_manager=config_manager,
-                    is_live=model.get('is_live', False)
+                    config_manager=config_manager
                 )
                 print(f"  [OK] Model {model_id} ({model_name})")
             except Exception as e:
                 print(f"  [ERROR] Model {model_id} ({model_name}): {e}")
                 continue
-
+        
         print(f"[INFO] Initialized {len(trading_engines)} engine(s)\n")
-
+        
     except Exception as e:
         print(f"[ERROR] Init engines failed: {e}\n")
 
@@ -1024,23 +986,161 @@ if __name__ == '__main__':
         trading_thread.start()
         print("[INFO] Auto-trading enabled")
     
+    print("[INFO] Starting WebSocket server...")
+
+    # Start WebSocket server
+    try:
+        from websocket_server import ws_manager
+        from websocket_services import ws_service_manager
+        import asyncio
+        
+        # Initialize WebSocket services
+        ws_service_manager.initialize(db, market_fetcher, trading_engines, config_manager)
+        
+        # Start WebSocket server in separate thread
+        def run_websocket_server():
+            """WebSocket服务器线程 - 带有异常处理和自动重启"""
+            retry_count = 0
+            max_retries = 5
+            
+            while retry_count < max_retries:
+                loop = None
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    async def websocket_main():
+                        try:
+                            # 先启动所有流式服务
+                            await ws_service_manager.start_all_services()
+                            # 然后启动WebSocket服务器（会阻塞）
+                            await ws_manager.start_server()
+                        except Exception as e:
+                            app.logger.error(f"[WebSocket] Service error: {e}")
+                            raise
+                        finally:
+                            # 确保停止WebSocket服务器
+                            await ws_manager.stop_server()
+                            # 停止所有流式服务
+                            try:
+                                await ws_service_manager.stop_all_services()
+                            except Exception as e:
+                                app.logger.warning(f"[WebSocket] Error stopping services: {e}")
+                    
+                    try:
+                        loop.run_until_complete(websocket_main())
+                    except KeyboardInterrupt:
+                        app.logger.info("[WebSocket] Received shutdown signal")
+                        break
+                    except RuntimeError as e:
+                        if "Event loop stopped" in str(e):
+                            app.logger.warning("[WebSocket] Event loop stopped unexpectedly, will restart")
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                wait_time = config_manager.timing.websocket_restart_delay_seconds
+                                app.logger.info(f"[WebSocket] Restarting in {wait_time}s... (attempt {retry_count}/{max_retries})")
+                                time.sleep(wait_time)
+                        else:
+                            raise
+                    except OSError as e:
+                        if e.errno == 10048:  # 端口被占用
+                            app.logger.error(f"[WebSocket] Port {config_manager.server.websocket_port} is already in use")
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                wait_time = 15  # 端口占用时等待更长时间
+                                app.logger.info(f"[WebSocket] Waiting {wait_time}s for port to be released... (attempt {retry_count}/{max_retries})")
+                                time.sleep(wait_time)
+                            else:
+                                app.logger.error("[WebSocket] Max retries reached, giving up")
+                                break
+                        else:
+                            raise
+                    except Exception as e:
+                        app.logger.error(f"[WebSocket] Server error: {e}")
+                        import traceback
+                        app.logger.error(f"[WebSocket] Traceback: {traceback.format_exc()}")
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            wait_time = config_manager.timing.websocket_restart_delay_seconds
+                            app.logger.info(f"[WebSocket] Restarting in {wait_time}s... (attempt {retry_count}/{max_retries})")
+                            time.sleep(wait_time)
+                        else:
+                            app.logger.error("[WebSocket] Max retries reached, giving up")
+                    finally:
+                        # 确保关闭事件循环
+                        if loop and loop.is_running():
+                            loop.stop()
+                        if loop and not loop.is_closed():
+                            try:
+                                # 取消所有待处理的任务
+                                pending = asyncio.all_tasks(loop)
+                                for task in pending:
+                                    task.cancel()
+                                # 等待任务取消完成
+                                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                            except Exception:
+                                pass
+                            finally:
+                                loop.close()
+                except Exception as e:
+                    app.logger.error(f"[WebSocket] Fatal error in thread: {e}")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        time.sleep(config_manager.timing.websocket_restart_delay_seconds)
+                finally:
+                    # 额外的清理步骤
+                    if loop and not loop.is_closed():
+                        try:
+                            loop.close()
+                        except Exception:
+                            pass
+        
+        ws_thread = threading.Thread(target=run_websocket_server, daemon=True)
+        ws_thread.start()
+        time.sleep(config_manager.timing.websocket_restart_delay_seconds)  # Wait for WebSocket server to start
+        print(f"[INFO] WebSocket server started on ws://localhost:{config_manager.server.websocket_port}")
+    except Exception as e:
+        print(f"[WARN] WebSocket server failed to start: {e}")
+        print("[INFO] Continuing with HTTP endpoints only...")
+
     print("\n" + "=" * 60)
     print("AITradeGame is running!")
-    print("Server: http://localhost:5000")
+    print(f"HTTP Server: http://localhost:{config_manager.server.http_port}")
+    print(f"WebSocket Server: ws://localhost:{config_manager.server.websocket_port}")
     print("Press Ctrl+C to stop")
     print("=" * 60 + "\n")
-    
+
     # 自动打开浏览器
     def open_browser():
-        time.sleep(1.5)  # 等待服务器启动
-        url = "http://localhost:5000"
+        time.sleep(config_manager.timing.browser_open_delay_seconds)  # 等待服务器启动
+        url = f"http://localhost:{config_manager.server.http_port}"
         try:
             webbrowser.open(url)
             print(f"[INFO] Browser opened: {url}")
         except Exception as e:
             print(f"[WARN] Could not open browser: {e}")
-    
+
     browser_thread = threading.Thread(target=open_browser, daemon=True)
     browser_thread.start()
-    
-    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
+
+    try:
+        app.run(
+            debug=config_manager.server.enable_debug,
+            host=config_manager.server.http_host,
+            port=config_manager.server.http_port,
+            use_reloader=config_manager.server.enable_reloader
+        )
+    finally:
+        # Cleanup WebSocket server on shutdown
+        if ws_manager.running:
+            print("[INFO] Shutting down WebSocket server...")
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(ws_manager.stop_server())
+                loop.run_until_complete(ws_service_manager.stop_all_services())
+                loop.close()
+                print("[INFO] WebSocket server shutdown complete")
+            except Exception as e:
+                print(f"[WARN] Error shutting down WebSocket server: {e}")

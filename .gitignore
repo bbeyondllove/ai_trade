@@ -1,8 +1,30 @@
+# Python
 __pycache__
+*.pyc
+*.pyo
+*.egg-info/
+
+# 环境
 .env
-.venv  
+.venv
+venv/
+ENV/
+
+# 数据库和日志
 *.db
 *.log
-logs
-.claude
+logs/
 
+# 分析报告
+codeguard_analysis/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# 操作系统
+.DS_Store
+Thumbs.db

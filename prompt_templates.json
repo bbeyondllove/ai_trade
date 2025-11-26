@@ -1,0 +1,45 @@
+{
+  "main_template": "{system_title}\n当前时间: {current_time}\n\n{sections}",
+  
+  "sections": {
+    "market_analysis": {
+      "enabled": true,
+      "title": "市场分析",
+      "template": "==================== {title} ====================\n实时市场概览：\n{market_overview}\n\n深度技术分析：\n{tech_analysis}\n\n多时间框架确认：\n{multi_timeframe}\n\n市场情绪指标：\n{market_sentiment}\n\n关键价格水平：\n{key_levels}\n"
+    },
+    
+    "trading_strategy": {
+      "enabled": true,
+      "title": "交易策略",
+      "template": "==================== {title} ====================\n{trading_rules}"
+    },
+    
+    "risk_management": {
+      "enabled": true,
+      "title": "风险管理",
+      "template": "==================== {title} ====================\n{risk_rules}"
+    },
+    
+    "account_status": {
+      "enabled": true,
+      "title": "资金状况",
+      "template": "==================== {title} ====================\n账户概况：\n- 总资产: ${total_value:,.2f}\n- 可用现金: ${cash:,.2f} ({cash_ratio:.1%})\n- 当前持仓: {positions_count}个币种\n- 资金使用率: {usage_ratio:.1%}\n\n**当前持仓明细** (⚠️ 重要: 检查是否需要平仓)：\n{current_positions}\n\n{portfolio_health}"
+    },
+    
+    "decision_output": {
+      "enabled": true,
+      "title": "决策输出",
+      "template": "==================== {title} ====================\n{output_requirements}\n\n{json_instructions}\n\n输出格式示例：\n``json\n{json_example}\n```\n\n{trading_principles}\n\n{important_reminders}\n\n{short_strategy}"
+    }
+  },
+  
+  "trading_rules_template": "USE_FUNCTION:get_trading_rules_template",
+  
+  "risk_management_template": "USE_FUNCTION:get_risk_management_template",
+  
+  "cash_strategy_templates": {
+    "high": "现金充足: 可积极寻找1-3个高置信度机会，单个仓位50-70%",
+    "medium": "现金适中: 选择1-2个最佳机会，保持30%现金储备",
+    "low": "现金紧张: 优先管理现有持仓，谨慎开新仓"
+  }
+}

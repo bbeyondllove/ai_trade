@@ -10,6 +10,34 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 @dataclass
+class ServerConfig:
+    """服务器配置"""
+    http_host: str = "0.0.0.0"
+    http_port: int = 5000
+    websocket_host: str = "0.0.0.0"
+    websocket_port: int = 8765
+    enable_debug: bool = False
+    enable_reloader: bool = False
+
+@dataclass
+class TimingConfig:
+    """时间配置"""
+    idle_wait_seconds: int = 30
+    websocket_restart_delay_seconds: int = 2
+    browser_open_delay_seconds: float = 1.5
+    github_api_timeout_seconds: int = 5
+    provider_api_timeout_seconds: int = 10
+    retry_delay_seconds: int = 1
+
+@dataclass
+class LimitsConfig:
+    """数据限制配置"""
+    account_value_history_limit: int = 100
+    chart_data_limit: int = 100
+    trades_limit_default: int = 50
+    leaderboard_update_interval_seconds: int = 30
+
+@dataclass
 class RiskConfig:
     """风险管理配置"""
     max_daily_loss: float = 0.05
@@ -22,8 +50,15 @@ class RiskConfig:
     consecutive_loss_limit: int = 3
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.08
+    # 新增配置项
+    allowed_leverages: list = field(default_factory=lambda: [3, 5, 10])
+    max_position_coins: int = 3
+    max_total_position_ratio: float = 0.70
     # 添加币种列表配置，不设置默认值，强制从配置文件读取
     monitored_coins: Optional[list] = None
+    # 止盈止损阈值配置
+    take_profit_threshold: float = 0.30  # 默认30%止盈
+    stop_loss_threshold: float = 0.05    # 默认5%止损
 
 @dataclass
 class TradingConfig:
@@ -34,6 +69,8 @@ class TradingConfig:
     order_timeout_seconds: int = 30
     retry_attempts: int = 3
     cooldown_after_loss: int = 300  # 5分钟
+    api_timeout_seconds: int = 15  # 市场数据API超时
+    live_api_timeout_seconds: int = 30  # 实盘交易API超时
 
 @dataclass
 class PerformanceConfig:
@@ -44,14 +81,19 @@ class PerformanceConfig:
     max_trades_per_day: int = 50
     enable_circuit_breaker: bool = True
     circuit_breaker_duration: int = 30  # 分钟
+    websocket_market_update_interval: float = 1.0  # WebSocket市场价格推送间隔（秒）
+    websocket_portfolio_update_interval: float = 2.0  # WebSocket投资组合推送间隔（秒）
 
 @dataclass
 class CacheConfig:
     """缓存配置"""
-    price_cache_ttl: int = 30  # 秒
+    price_cache_ttl: int = 2  # 秒 - 与前端轮询间隔一致，确保实时刷新
     indicators_cache_ttl: int = 300  # 秒
     decisions_cache_ttl: int = 60  # 秒
     max_cache_size: int = 1000
+    # K线数据池限制（防止内存无限增长）
+    max_kline_length: int = 1000  # 每个币种最多保留1000根K线
+    min_kline_length: int = 100   # 最小保留100根K线（量化策略需要）
 
 @dataclass
 class LoggingConfig:
@@ -64,6 +106,34 @@ class LoggingConfig:
     enable_trade_logs: bool = True
     enable_performance_logs: bool = True
 
+
+@dataclass
+class PromptsConfig:
+    """提示词配置"""
+    system_role: str = "你是一个专业的加密货币交易员。只输出JSON格式。"
+    decision_system_title: str = "专业量化交易决策系统 v2.0"
+    trading_principles: list = field(default_factory=lambda: [
+        "趋势为王：只在明显趋势中交易",
+        "双向交易：做多做空机会平等对待，不要只偏向做多",
+        "风险优先：单笔亏损不超过总资金的2%",
+        "概率致胜：只参与高胜率交易机会"
+    ])
+    important_reminders: list = field(default_factory=lambda: [
+        "宁可错过，不要做错",
+        "严格控制单笔风险"
+    ])
+    short_strategy_signals: list = field(default_factory=lambda: [
+        "价格跌破关键支撑位",
+        "RSI>70且出现顶背离"
+    ])
+    short_strategy_reminder: str = "不要因为害怕做空而只做多！熊市中做空是主要盈利方式！"
+    high_volatility_leverage_limit: int = 5
+    high_volatility_leverage_suggestion: int = 3
+    min_risk_reward_ratio: float = 1.5
+    output_requirements: list = field(default_factory=lambda: [
+        "只输出JSON格式，不包含任何其他文字"
+    ])
+
 class ConfigManager:
     """配置管理器"""
 
@@ -72,11 +142,15 @@ class ConfigManager:
         self.config_path = Path(self.config_file)
 
         # 默认配置
+        self.server = ServerConfig()
+        self.timing = TimingConfig()
+        self.limits = LimitsConfig()
         self.risk = RiskConfig()
         self.trading = TradingConfig()
         self.performance = PerformanceConfig()
         self.cache = CacheConfig()
         self.logging = LoggingConfig()
+        self.prompts = PromptsConfig()
 
         # 加载配置
         self.load_config()
@@ -89,6 +163,15 @@ class ConfigManager:
                     config_data = json.load(f)
 
                 # 更新配置
+                if 'server' in config_data:
+                    self._update_dataclass(self.server, config_data['server'])
+
+                if 'timing' in config_data:
+                    self._update_dataclass(self.timing, config_data['timing'])
+
+                if 'limits' in config_data:
+                    self._update_dataclass(self.limits, config_data['limits'])
+
                 if 'risk' in config_data:
                     self._update_dataclass(self.risk, config_data['risk'])
 
@@ -104,6 +187,10 @@ class ConfigManager:
                 if 'logging' in config_data:
                     self._update_dataclass(self.logging, config_data['logging'])
 
+
+                if 'prompts' in config_data:
+                    self._update_dataclass(self.prompts, config_data['prompts'])
+
                 print(f"Configuration loaded from {self.config_file}")
 
             except Exception as e:
@@ -116,11 +203,15 @@ class ConfigManager:
         """保存配置到文件"""
         try:
             config_data = {
+                'server': asdict(self.server),
+                'timing': asdict(self.timing),
+                'limits': asdict(self.limits),
                 'risk': asdict(self.risk),
                 'trading': asdict(self.trading),
                 'performance': asdict(self.performance),
                 'cache': asdict(self.cache),
-                'logging': asdict(self.logging)
+                'logging': asdict(self.logging),
+                'prompts': asdict(self.prompts)
             }
 
             with open(self.config_path, 'w', encoding='utf-8') as f:

@@ -5,6 +5,7 @@ openai>=1.0.0
 pyinstaller>=5.13.0
 backoff>=2.2.1
 python-dotenv>=1.0.0
+websockets==15.0.1
 
 # OKX SDK dependencies
 httpx[http2]>=0.24.0

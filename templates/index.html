@@ -101,17 +101,7 @@
                     </div>
                 </div>
 
-                <!-- Chart -->
-                <div class="content-card">
-                    <div class="card-header">
-                        <h3 class="card-title">账户价值走势</h3>
-                    </div>
-                    <div class="card-body">
-                        <div id="accountChart" style="width: 100%; height: 300px;"></div>
-                    </div>
-                </div>
-
-                <!-- Tabs -->
+                <!-- Tabs (持仓区域放在上方，作为主界面) -->
                 <div class="content-card">
                     <div class="card-tabs">
                         <button class="tab-btn active" data-tab="positions">持仓</button>
@@ -166,6 +156,16 @@
                         <div id="conversationsBody" class="conversations-list">
                             <div class="empty-state">暂无对话记录</div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Account Value Chart (放在最下方，不干扰持仓查看) -->
+                <div class="content-card">
+                    <div class="card-header">
+                        <h3 class="card-title">账户价值走势</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="accountChart" style="width: 100%; height: 280px;"></div>
                     </div>
                 </div>
             </main>
@@ -282,7 +282,7 @@
             <div class="modal-body">
                 <div class="form-group">
                     <label>交易频率（分钟）</label>
-                    <input type="number" id="tradingFrequency" min="1" max="1440" class="form-input" placeholder="60">
+                    <input type="number" id="tradingFrequency" min="1" max="1440" class="form-input" placeholder="5">
                     <small class="form-help">设置AI交易决策的时间间隔（1-1440分钟）</small>
                 </div>
                 <div class="form-group">
@@ -348,6 +348,24 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20251122v2"></script>
+    <!-- WebSocket Real-time Client -->
+    <script src="/static/websocket-client.js?v=20251122v2"></script>
+    <!-- WebSocket Integration (修复后的版本) -->
+    <script src="/static/websocket-integration.js?v=20251122v2"></script>
+
+    <!-- WebSocket调试工具 -->
+    <script>
+        // 添加全局调试函数
+        window.debugWebSocket = function() {
+            if (window.wsClient) {
+                console.log('WebSocket Status:', window.wsClient.getStatus());
+                return window.wsClient.getStatus();
+            } else {
+                console.error('WebSocket client not available');
+                return null;
+            }
+        };
+    </script>
 </body>
 </html>
