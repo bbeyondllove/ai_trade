@@ -44,6 +44,9 @@ except Exception as e:
 app = Flask(__name__)
 CORS(app)
 
+# 获取配置管理器（需要在日志配置之前）
+config_manager = get_config()
+
 # 配置日志
 if not app.debug:
     # 确保logs目录存在
@@ -64,24 +67,30 @@ if not app.debug:
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
         ))
-        file_handler.setLevel(logging.INFO)
+        
+        # 从配置文件读取日志级别
+        log_level = getattr(logging, config_manager.logging.level, logging.INFO)
+        file_handler.setLevel(log_level)
         
         # 配置根日志记录器
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
+        root_logger.setLevel(log_level)
         root_logger.addHandler(file_handler)
         
-        # 禁用httpx的详细日志
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        # 从配置文件读取第三方库日志级别
+        for lib_name, lib_level in config_manager.logging.third_party_log_levels.items():
+            lib_log_level = getattr(logging, lib_level, logging.WARNING)
+            logging.getLogger(lib_name).setLevel(lib_log_level)
         
         # 确保Flask的logger也使用相同的处理器
         app.logger.addHandler(file_handler)
-        app.logger.setLevel(logging.INFO)
+        app.logger.setLevel(log_level)
         app.logger.propagate = False
         
         # 添加启动日志
         app.logger.info('AITradeGame startup')
+        app.logger.info(f'日志级别: {config_manager.logging.level}')
+        app.logger.info(f'第三方库日志级别: {config_manager.logging.third_party_log_levels}')
     else:
         # 如果已经存在FileHandler，检查是否需要更新到今天的文件
         current_handler = file_handlers[0]
@@ -94,17 +103,22 @@ if not app.debug:
                 file_handler.setFormatter(logging.Formatter(
                     '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
                 ))
-                file_handler.setLevel(logging.INFO)
+                
+                # 从配置文件读取日志级别
+                log_level = getattr(logging, config_manager.logging.level, logging.INFO)
+                file_handler.setLevel(log_level)
                 
                 root_logger = logging.getLogger()
                 root_logger.addHandler(file_handler)
                 
-                # 禁用httpx的详细日志
-                logging.getLogger("httpx").setLevel(logging.WARNING)
-                logging.getLogger("httpcore").setLevel(logging.WARNING)
+                # 从配置文件读取第三方库日志级别
+                for lib_name, lib_level in config_manager.logging.third_party_log_levels.items():
+                    lib_log_level = getattr(logging, lib_level, logging.WARNING)
+                    logging.getLogger(lib_name).setLevel(lib_log_level)
                 
                 app.logger.addHandler(file_handler)
                 app.logger.info('AITradeGame startup - new day log file')
+                app.logger.info(f'日志级别: {config_manager.logging.level}')
             else:
                 app.logger.info('AITradeGame startup - using existing daily log file')
 
@@ -113,8 +127,7 @@ market_fetcher = get_async_market_fetcher()
 trading_engines = {}
 auto_trading = True
 
-# 获取配置管理器
-config_manager = get_config()
+# 从配置管理器获取交易费率
 TRADE_FEE_RATE = config_manager.trading.fee_rate
 
 # 初始化事件总线
@@ -321,14 +334,9 @@ def get_portfolio(model_id):
         current_prices = get_current_market_prices(market_fetcher)
         
         portfolio = db.get_portfolio(model_id, current_prices)
-        account_value = db.get_account_value_history(
-            model_id, 
-            limit=config_manager.limits.account_value_history_limit
-        )
         
         return jsonify({
-            'portfolio': portfolio,
-            'account_value_history': account_value
+            'portfolio': portfolio
         })
     except ValueError as e:
         return jsonify({'error': str(e)}), 500
@@ -391,12 +399,14 @@ def get_aggregated_portfolio():
     models = db.get_all_models()
     total_portfolio = {
         'total_value': 0,
-        'cash': 0,
+        'cash': 0,  # 累加所有模型的可用现金
+        'free_balance': 0,  # 实盘模式下也需要累加可用余额
         'positions_value': 0,
         'realized_pnl': 0,
         'unrealized_pnl': 0,
         'initial_capital': 0,
-        'positions': []
+        'positions': [],
+        'is_live': False  # 默认为模拟盘
     }
 
     all_positions = {}
@@ -414,11 +424,18 @@ def get_aggregated_portfolio():
                   f"is_live={portfolio.get('is_live', False)}")
             
             total_portfolio['total_value'] += portfolio.get('total_value', 0)
-            total_portfolio['cash'] += portfolio.get('cash', 0)
             total_portfolio['positions_value'] += portfolio.get('positions_value', 0)
             total_portfolio['realized_pnl'] += portfolio.get('realized_pnl', 0)
             total_portfolio['unrealized_pnl'] += portfolio.get('unrealized_pnl', 0)
             total_portfolio['initial_capital'] += portfolio.get('initial_capital', 0)
+            
+            # 累加实盘相关字段
+            total_portfolio['cash'] += portfolio.get('cash', 0)
+            total_portfolio['free_balance'] += portfolio.get('free_balance', 0)
+            
+            # 如果有任何一个模型是实盘，则聚合视图标记为实盘
+            if portfolio.get('is_live', False):
+                total_portfolio['is_live'] = True
 
             # Aggregate positions by coin and side
             for pos in portfolio.get('positions', []):
@@ -453,24 +470,15 @@ def get_aggregated_portfolio():
                         current_pos['pnl'] = 0
 
     total_portfolio['positions'] = list(all_positions.values())
-
-    # Get multi-model chart data
-    chart_data = db.get_multi_model_chart_data(
-        limit=config_manager.limits.chart_data_limit
-    )
+    
+    # 计算聚合可用现金：计算方式是先累加总资产和持仓价，最后一起计算
+    # 可用现金 = 计算后的总资产 - 计算后的持仓价
+    total_portfolio['cash'] = total_portfolio['total_value'] - total_portfolio['positions_value']
 
     return jsonify({
         'portfolio': total_portfolio,
-        'chart_data': chart_data,
         'model_count': len(models)
     })
-
-@app.route('/api/models/chart-data', methods=['GET'])
-def get_models_chart_data():
-    """Get chart data for all models"""
-    limit = request.args.get('limit', 100, type=int)
-    chart_data = db.get_multi_model_chart_data(limit=limit)
-    return jsonify(chart_data)
 
 @app.route('/api/market/prices', methods=['GET'])
 def get_market_prices():
@@ -830,10 +838,12 @@ def check_update():
 
         # Try to get latest release
         try:
+            # 禁用代理以避免超时问题
             response = requests.get(
                 f"https://api.github.com/repos/{__github_owner__}/{__repo__}/releases/latest",
                 headers=headers,
-                timeout=config_manager.timing.github_api_timeout_seconds
+                timeout=config_manager.timing.github_api_timeout_seconds,
+                proxies={'http': None, 'https': None}  # 禁用代理
             )
 
             try:
@@ -981,11 +991,6 @@ if __name__ == '__main__':
 
     init_trading_engines()
     
-    if auto_trading:
-        trading_thread = threading.Thread(target=trading_loop, daemon=True)
-        trading_thread.start()
-        print("[INFO] Auto-trading enabled")
-    
     print("[INFO] Starting WebSocket server...")
 
     # Start WebSocket server
@@ -1097,11 +1102,35 @@ if __name__ == '__main__':
         
         ws_thread = threading.Thread(target=run_websocket_server, daemon=True)
         ws_thread.start()
+        
+        # ✅ 等待WebSocket服务和多周期数据加载完成
+        print("[INFO] Waiting for WebSocket services and multi-timeframe data to be ready...")
+        wait_timeout = 120  # 最多等待120秒
+        wait_start = time.time()
+        while time.time() - wait_start < wait_timeout:
+            # 检查是否所有多周期数据都加载完成
+            if ws_service_manager and hasattr(ws_service_manager, 'multi_candle_manager'):
+                multi_candle_manager = ws_service_manager.multi_candle_manager
+                if multi_candle_manager and hasattr(multi_candle_manager, 'is_ready'):
+                    if multi_candle_manager.is_ready():
+                        app.logger.info("[INFO] Multi-timeframe data is ready, starting trading loop")
+                        break
+            time.sleep(1)
+        else:
+            # 超时但继续启动
+            app.logger.warning("[WARN] Timeout waiting for multi-timeframe data, starting trading loop anyway")
+        
         time.sleep(config_manager.timing.websocket_restart_delay_seconds)  # Wait for WebSocket server to start
         print(f"[INFO] WebSocket server started on ws://localhost:{config_manager.server.websocket_port}")
     except Exception as e:
         print(f"[WARN] WebSocket server failed to start: {e}")
         print("[INFO] Continuing with HTTP endpoints only...")
+    
+    # ✅ 仅在WebSocket服务启动后再启动交易循环
+    if auto_trading:
+        trading_thread = threading.Thread(target=trading_loop, daemon=True)
+        trading_thread.start()
+        print("[INFO] Auto-trading enabled")
 
     print("\n" + "=" * 60)
     print("AITradeGame is running!")
@@ -1136,11 +1165,22 @@ if __name__ == '__main__':
             print("[INFO] Shutting down WebSocket server...")
             try:
                 import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                # 使用当前运行中的事件循环，而不是创建新的
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # 如果没有运行中的循环，则获取当前线程的默认循环
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                
                 loop.run_until_complete(ws_manager.stop_server())
                 loop.run_until_complete(ws_service_manager.stop_all_services())
-                loop.close()
+                
+                # 只在创建了新循环时才关闭
+                if not loop.is_running():
+                    loop.close()
                 print("[INFO] WebSocket server shutdown complete")
             except Exception as e:
                 print(f"[WARN] Error shutting down WebSocket server: {e}")

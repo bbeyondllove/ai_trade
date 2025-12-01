@@ -6,6 +6,7 @@ Live Trading Service Interface
 import os
 import sys
 import logging
+import ssl
 import threading
 import time
 from typing import Dict, Optional
@@ -213,15 +214,18 @@ class LiveTradingService:
                 self.symbol_mapping = symbol_mapping
                 logger.info(f"成功初始化 {len(symbol_mapping)} 个支持的币种")
                 
-                # 输出常用币种的lotSz信息（用于调试）
-                common_coins = ['BTC', 'ETH', 'SOL', 'ZEC', 'WLFI', '0G', 'CFX']
-                logger.info("常用币种合约规格:")
-                for coin in common_coins:
+                # 输出监控币种的合约规格（从配置读取）
+                from config_manager import config_manager
+                monitored_coins = config_manager.risk.monitored_coins
+                logger.info(f"监控币种合约规格（共{len(monitored_coins)}个）:")
+                for coin in monitored_coins:
                     if coin in symbol_mapping:
                         lot_sz = symbol_mapping[coin]['lotSz']
                         min_sz = symbol_mapping[coin]['min_size']
                         ct_val = symbol_mapping[coin]['ctVal']
                         logger.info(f"  {coin}: ctVal={ct_val}, lotSz={lot_sz}, minSz={min_sz}")
+                    else:
+                        logger.warning(f"  {coin}: 未在OKX SWAP合约中找到")
                 
                 return True
             else:
@@ -331,8 +335,8 @@ class LiveTradingService:
                 else:
                     return create_error_response(result.get('msg', 'API error') if result else 'Connection failed')
                     
-            except (ConnectionError, TimeoutError, OSError) as e:
-                # 网络相关错误,可以重试
+            except (ConnectionError, TimeoutError, OSError, ssl.SSLError) as e:
+                # 网络相关错误(包括SSL错误),可以重试
                 if attempt < max_retries - 1:
                     # 指数退避: 1s, 2s, 4s, 8s
                     retry_delay = base_delay * (2 ** attempt)
@@ -462,8 +466,8 @@ class LiveTradingService:
                     error_msg = positions_result.get('msg', 'API error') if positions_result else 'Connection failed'
                     return create_error_response(error_msg)
                     
-            except (ConnectionError, TimeoutError, OSError) as e:
-                # 网络相关错误,可以重试
+            except (ConnectionError, TimeoutError, OSError, ssl.SSLError) as e:
+                # 网络相关错误(包括SSL错误),可以重试
                 if attempt < max_retries - 1:
                     # 指数退避: 1s, 2s, 4s, 8s
                     retry_delay = base_delay * (2 ** attempt)

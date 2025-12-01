@@ -93,8 +93,20 @@ class OKXWebSocketPriceFeed:
             await self.ws_client.subscribe(subscribe_params, self._handle_message)
             logger.info(f"Subscribed to {len(subscribe_params)} tickers")
             
-            # 开始消费消息
-            await self.ws_client.consume()
+            # ✅ 启动心跳监控任务（防止连接断开）
+            heartbeat_task = asyncio.create_task(self._send_heartbeat())
+            
+            try:
+                # 开始消费消息
+                await self.ws_client.consume()
+            finally:
+                # 取消心跳任务
+                if not heartbeat_task.done():
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
             
         except Exception as e:
             logger.error(f"Connection error: {e}")
@@ -105,7 +117,26 @@ class OKXWebSocketPriceFeed:
                     await self.ws_client.stop()
                 except:
                     pass
-                    
+    
+    async def _send_heartbeat(self):
+        """✅ 定期发送心跳保活连接"""
+        try:
+            while self.running:
+                await asyncio.sleep(15)  # 每15秒发送一次心跳
+                try:
+                    if self.ws_client and self.ws_client.websocket:
+                        # 发送ping消息以保活连接
+                        ping_msg = json.dumps({"op": "ping"})
+                        await self.ws_client.websocket.send(ping_msg)
+                        logger.debug("[Price] Sent heartbeat ping")
+                except Exception as e:
+                    logger.warning(f"[Price] Heartbeat error: {e}")
+                    break
+        except asyncio.CancelledError:
+            logger.debug("[Price] Heartbeat task cancelled")
+        except Exception as e:
+            logger.error(f"[Price] Heartbeat task error: {e}")
+
     def _handle_message(self, message: str):
         """处理WebSocket消息"""
         try:

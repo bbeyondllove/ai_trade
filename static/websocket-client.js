@@ -5,9 +5,9 @@
 
 class WebSocketClient {
     constructor(options = {}) {
-        // 配置选项
+        // 配置选项（url会在fetchWebSocketInfo后更新）
         this.options = {
-            url: options.url || `ws://${window.location.hostname}:8765`,
+            url: options.url || null,  // 初始为null，将从API获取
             reconnectInterval: options.reconnectInterval || 3000,
             heartbeatInterval: options.heartbeatInterval || 25000,
             maxReconnectAttempts: options.maxReconnectAttempts || 10,
@@ -20,6 +20,7 @@ class WebSocketClient {
         this.reconnectTimer = null;
         this.heartbeatTimer = null;
         this.clientId = null;
+        this.websocketInfoFetched = false;  // 标记是否已获取WebSocket配置
 
         // 连接状态
         this.isConnected = false;
@@ -52,15 +53,50 @@ class WebSocketClient {
             last_update: null
         };
 
-        console.log('[WebSocketClient] Initialized with URL:', this.options.url);
+        // 初始化时不输出URL（因为还未获取）
+        console.log('[WebSocketClient] Initialized, will fetch WebSocket URL from API');
+    }
+
+    /**
+     * 从后端API获取WebSocket配置
+     */
+    async fetchWebSocketInfo() {
+        try {
+            const response = await fetch('/api/websocket/info');
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            this.options.url = data.websocket_url;
+            this.websocketInfoFetched = true;
+            console.log('[WebSocketClient] Fetched WebSocket URL from API:', this.options.url);
+            return true;
+        } catch (error) {
+            console.error('[WebSocketClient] Failed to fetch WebSocket info:', error);
+            // 降级到默认配置
+            this.options.url = `ws://${window.location.hostname}:8765`;
+            this.websocketInfoFetched = true;
+            console.warn('[WebSocketClient] Using fallback URL:', this.options.url);
+            return false;
+        }
     }
 
     /**
      * 连接到WebSocket服务器
      */
-    connect() {
+    async connect() {
         if (this.isConnected || this.isConnecting) {
             console.log('[WebSocketClient] Already connected or connecting');
+            return;
+        }
+
+        // 如果还未获取WebSocket配置，先获取
+        if (!this.websocketInfoFetched) {
+            await this.fetchWebSocketInfo();
+        }
+
+        if (!this.options.url) {
+            console.error('[WebSocketClient] WebSocket URL not configured');
             return;
         }
 
@@ -398,8 +434,20 @@ class WebSocketClient {
         this.subscriptions.clear();
 
         subscriptions.forEach(sub => {
-            const [channel, modelFilter] = sub.split('_');
-            this.subscribe(channel, modelFilter || null);
+            // 解析订阅键，支持带model_filter的订阅
+            if (sub.includes('_')) {
+                // 查找最后一个下划线的位置，避免频道名称中包含下划线的情况
+                const lastUnderscoreIndex = sub.lastIndexOf('_');
+                const channel = sub.substring(0, lastUnderscoreIndex);
+                const modelFilter = sub.substring(lastUnderscoreIndex + 1);
+                
+                // 检查modelFilter是否为数字
+                const modelId = isNaN(modelFilter) ? null : parseInt(modelFilter);
+                this.subscribe(channel, modelId);
+            } else {
+                // 没有model_filter的订阅
+                this.subscribe(sub, null);
+            }
         });
     }
 

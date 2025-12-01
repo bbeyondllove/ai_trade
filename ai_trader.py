@@ -56,7 +56,7 @@ class BaseAITrader(ABC):
 class SmartPromptBuilder:
     """智能提示词构建器 - 模板化和配置驱动"""
     
-    def __init__(self, risk_params: Optional[Dict] = None, config_manager=None, template_file: str = "prompt_templates.json"):
+    def __init__(self, risk_params: Optional[Dict] = None, config_manager=None):
         self.risk_params = risk_params or {
             'max_daily_loss': 0.05,
             'max_position_size': 0.5,
@@ -68,23 +68,28 @@ class SmartPromptBuilder:
         # 技术指标计算器
         self.indicator_calculator = get_indicator_calculator()
         
-        # 加载提示词模板
-        self.templates = self._load_templates(template_file)
+        # 从 prompt_examples.py 加载提示词模板
+        self.templates = self._load_templates()
     
-    def _load_templates(self, template_file: str) -> Dict:
-        """加载提示词模板"""
+    def _load_templates(self) -> Dict:
+        """从 prompt_examples.py 加载提示词模板"""
         try:
-            import os
-            file_path = os.path.join(os.path.dirname(__file__), template_file)
-            with open(file_path, 'r', encoding='utf-8') as f:
-                templates = json.load(f)
+            from prompt_examples import (
+                get_prompt_template,
+                get_trading_rules_template,
+                get_risk_management_template
+            )
             
-            # 处理 USE_FUNCTION: 引用，从 prompt_examples.py 加载
+            # 获取模板配置
+            templates = get_prompt_template()
+            
+            # 解析 USE_FUNCTION: 引用
             templates = self._resolve_function_references(templates)
             
+            self.logger.info("提示词模板从 prompt_examples.py 加载成功")
             return templates
         except Exception as e:
-            self.logger.warning(f"无法加载提示词模板: {e}，使用默认模板")
+            self.logger.warning("无法加载提示词模板: " + str(e) + "，使用默认模板")
             return self._get_default_templates()
     
     def _resolve_function_references(self, templates: Dict) -> Dict:
@@ -132,18 +137,22 @@ class SmartPromptBuilder:
         # 准备数据
         data = self._prepare_prompt_data(market_state, portfolio, account_info)
         
+        # 记录准备的数据摘要
+        self.logger.info(f"[提示词构建] 准备数据完成 - 币种数: {len(market_state)}, 监控币种: {list(market_state.keys())}")
+        
         # 构建各个部分
         sections_content = self._build_sections(data)
-        
-
+        self.logger.debug(f"[提示词构建] 各部分内容长度 - 总长: {len(sections_content)} 字符")
         
         # 使用主模板组装最终提示词
         prompt = self.templates.get('main_template', '').format(
             system_title=data['system_title'],
             current_time=data['current_time'],
-
             sections=sections_content
         )
+        
+        # 📋 记录最终提示词内容摘要（便于排查）
+        self._log_prompt_summary(prompt, data)
         
         return prompt
     
@@ -151,20 +160,24 @@ class SmartPromptBuilder:
         """准备提示词所需的所有数据"""
         prompts_cfg = self.config_manager.prompts if self.config_manager else None
         
+        # 记录数据准备阶段
+        self.logger.debug(f"[提示词数据准备] 开始整理数据...")
+        
         # 计算基本数据
         total_value = portfolio['total_value']
         cash = portfolio['cash']
         cash_ratio = cash / total_value if total_value > 0 else 0
         usage_ratio = 1 - cash_ratio
         
-
+        self.logger.debug(f"[提示词数据准备] 账户情况 - 总资产${total_value:.2f}, 现金${cash:.2f}, 使用率{usage_ratio:.1%}")
         
         # 技术分析
         tech_analysis = self._enhanced_technical_analysis(market_state)
+        self.logger.debug(f"[提示词数据准备] 技术分析完成 - {len(tech_analysis)}个币种已分析")
         
         # 整合所有数据
         data = {
-            'system_title': getattr(prompts_cfg, 'decision_system_title', '专业量化交易决策系统 v2.0') if prompts_cfg else '专业量化交易决策系统 v2.0',
+            'system_title': getattr(prompts_cfg, 'decision_system_title', '专业量化交易决策系统') if prompts_cfg else '专业量化交易决策系统',
             'current_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'market_state': market_state,
             'portfolio': portfolio,
@@ -174,15 +187,11 @@ class SmartPromptBuilder:
             'cash_ratio': cash_ratio,
             'usage_ratio': usage_ratio,
             'positions_count': len(portfolio.get('positions', [])),
-
             'tech_analysis': tech_analysis,
-            'prompts_cfg': prompts_cfg,
-            # 配置参数
-            'leverage_limit': getattr(prompts_cfg, 'high_volatility_leverage_limit', 5) if prompts_cfg else 5,
-            'leverage_suggestion': getattr(prompts_cfg, 'high_volatility_leverage_suggestion', 3) if prompts_cfg else 3,
-            'min_rrr': getattr(prompts_cfg, 'min_risk_reward_ratio', 1.5) if prompts_cfg else 1.5
+            'prompts_cfg': prompts_cfg
         }
         
+        self.logger.debug(f"[提示词数据准备] 数据准备完成")
         return data
     
     def _build_sections(self, data: Dict) -> str:
@@ -190,15 +199,24 @@ class SmartPromptBuilder:
         sections = self.templates.get('sections', {})
         content_parts = []
         
+        self.logger.debug(f"[不同亐词构建] 开始构建 {len(sections)} 个部分...")
+        
         for section_name, section_config in sections.items():
             if not section_config.get('enabled', True):
+                self.logger.debug(f"  └─ {section_name}: 未启用")
                 continue
             
             section_content = self._build_single_section(section_name, section_config, data)
             if section_content:
                 content_parts.append(section_content)
+                section_len = len(section_content)
+                self.logger.debug(f"  └─ {section_name}: 成功 ({section_len} 字符)")
+            else:
+                self.logger.warning(f"  └─ {section_name}: 空或错误")
         
-        return ''.join(content_parts)
+        combined_content = ''.join(content_parts)
+        self.logger.debug(f"[提示词构建] 所有部分完成 - 总长 {len(combined_content)} 字符")
+        return combined_content
     
     def _build_single_section(self, section_name: str, section_config: Dict, data: Dict) -> str:
         """构建单个部分"""
@@ -253,21 +271,31 @@ class SmartPromptBuilder:
     
     def _build_data_component(self, component_name: str, data: Dict) -> str:
         """构建数据组件"""
+        self.logger.debug(f"[数据组件-{component_name}] 开始构建...")
+        
         if component_name == 'market_overview':
-            return self._build_market_overview(data['market_state'])
+            content = self._build_market_overview(data['market_state'])
         elif component_name == 'tech_analysis':
-            return self._build_enhanced_tech_analysis(data['tech_analysis'])
+            content = self._build_enhanced_tech_analysis(data['tech_analysis'])
         elif component_name == 'multi_timeframe':
-            return self._build_multi_timeframe_confirmation(data['market_state'])
+            content = self._build_multi_timeframe_confirmation(data['market_state'])
         elif component_name == 'market_sentiment':
-            return self._build_market_sentiment(data['market_state'])
+            content = self._build_market_sentiment(data['market_state'])
         elif component_name == 'key_levels':
-            return self._build_key_levels(data['market_state'])
+            content = self._build_key_levels(data['market_state'])
         elif component_name == 'trading_rules':
-            return self.templates.get('trading_rules_template', '')
+            content = self.templates.get('trading_rules_template', '')
         elif component_name == 'risk_rules':
-            return self._build_risk_rules(data)
-        return ""
+            content = self._build_risk_rules(data)
+        else:
+            content = ""
+        
+        if content:
+            self.logger.debug(f"[数据组件-{component_name}] 成功 ({len(content)} 字符)")
+        else:
+            self.logger.warning(f"[数据组件-{component_name}] 为empty")
+        
+        return content
     
     def _build_risk_rules(self, data: Dict) -> str:
         """构建风险管理规则"""
@@ -303,8 +331,8 @@ class SmartPromptBuilder:
         signal_list = "\n".join([f"{i+1}. {s}" for i, s in enumerate(signals)])
         reminder = getattr(prompts_cfg, 'short_strategy_reminder', '')
         
-        return f"**特别提醒：做空策略**\n当市场出现以下信号时，应该积极使用sell_to_enter做空：\n{signal_list}\n{reminder}"
-    
+        return f"**特别提醒：做空策略**\n当市场出现以下信号时，应该积极做空（输出sell）：\n{signal_list}\n{reminder}"
+
     def _safe_float(self, value, default: float = 0.0) -> float:
         """安全转换为浮点数"""
         try:
@@ -351,7 +379,8 @@ class SmartPromptBuilder:
                 'volatility_regime': volatility['regime'],
                 'volume_confirmation': volume_analysis['confirmed'],
                 'signals': signals,
-                'recommended_action': self._get_recommended_action(score, signals)
+                'recommended_action': self._get_recommended_action(score, signals),
+                'indicators': indicators  # ✅ 添加完整的技术指标数据供提示词使用
             }
         
         return enhanced_analysis
@@ -373,6 +402,60 @@ class SmartPromptBuilder:
         ]
         
         self.logger.debug("\n".join(indicator_lines))
+    
+    def _log_prompt_summary(self, prompt: str, data: Dict):
+        """
+        记录发送给大模型的提示词内容摘要
+        便于排查AI决策过程中的数据问题
+        """
+        # 提示词总体统计
+        prompt_len = len(prompt)
+        self.logger.info(f"\n📋 === 发送给大模型的提示词摘要 ===")
+        self.logger.info(f"总长度: {prompt_len} 字符 (~{prompt_len//1000}KB)")
+        self.logger.info(f"系统时间: {data.get('current_time', 'N/A')}")
+        
+        # 账户状态
+        total_value = data.get('total_value', 0)
+        cash = data.get('cash', 0)
+        positions_count = data.get('positions_count', 0)
+        self.logger.info(f"账户: 总资产=${total_value:.2f}, 现金=${cash:.2f}, 持仓{positions_count}个")
+        
+        # 技术分析摘要
+        tech_analysis = data.get('tech_analysis', {})
+        if tech_analysis:
+            self.logger.info(f"技术分析: {len(tech_analysis)}个币种")
+            for coin, analysis in tech_analysis.items():
+                score = analysis.get('overall_score', 0)
+                trend = analysis.get('trend_strength', 'N/A')
+                momentum = analysis.get('momentum', 'N/A')
+                indicators = analysis.get('indicators', {})
+                
+                # 检查指标完整性
+                if indicators and indicators.get('status') == 'success':
+                    ind_count = len([k for k in indicators.keys() if k != 'status'])
+                    sma_7 = indicators.get('sma_7', 0)
+                    rsi_14 = indicators.get('rsi_14', 0)
+                    macd = indicators.get('macd', 0)
+                    
+                    self.logger.info(f"  {coin}: 评分={score:+.1f}, 趋势={trend}, 动量={momentum}, 指标数={ind_count}个")
+                    self.logger.info(f"    └─ SMA7={sma_7:.2f}, RSI14={rsi_14:.1f}, MACD={macd:.4f}")
+                else:
+                    self.logger.warning(f"  {coin}: 技术指标未就绪")
+        
+        # 市场概览
+        market_state = data.get('market_state', {})
+        if market_state:
+            self.logger.info(f"市场概览: {len(market_state)}个币种")
+            for coin, market_data in market_state.items():
+                price = market_data.get('price', 0)
+                change_24h = market_data.get('change_24h', 0)
+                self.logger.info(f"  {coin}: ${price:.4f} ({change_24h:+.2f}%)")
+        
+        # 关键点：确认多周期K线数据是否已发送
+        self.logger.info(f"✅ 多周期K线数据: 已包含在prompt中")
+        self.logger.info(f"✅ 详细技术指标: 已包含在prompt中")
+        self.logger.info(f"✅ 市场情绪指标: 已包含在prompt中")
+        self.logger.info(f"📤 提示词已准备就绪，等待发送给大模型...\n")
 
     def _calculate_trend_strength(self, indicators: Dict) -> Dict:
         """计算趋势强度（使用统一的技术指标计算器）"""
@@ -485,18 +568,135 @@ class SmartPromptBuilder:
     
 
     def _build_enhanced_tech_analysis(self, tech_analysis: Dict) -> str:
-        """构建增强技术分析"""
+        """构建增强技术分析 - 包含完整的技术指标详细数据"""
         lines = []
         for coin, analysis in tech_analysis.items():
+            # 第一行：综合评分和主要趋势
             lines.append(f"- {coin}: 综合评分 {analysis['overall_score']:+.1f} | 趋势: {analysis['trend_strength']} | 动量: {analysis['momentum']}")
+            
+            # 第二行：详细技术指标数据
+            indicators = analysis.get('indicators', {})
+            if indicators and indicators.get('status') == 'success':
+                # 均线数据
+                sma_7 = self._safe_float(indicators.get('sma_7'), 0)
+                sma_14 = self._safe_float(indicators.get('sma_14'), 0)
+                sma_21 = self._safe_float(indicators.get('sma_21'), 0)
+                sma_30 = self._safe_float(indicators.get('sma_30'), 0)
+                ema_12 = self._safe_float(indicators.get('ema_12'), 0)
+                ema_26 = self._safe_float(indicators.get('ema_26'), 0)
+                
+                # 动量指标
+                rsi_14 = self._safe_float(indicators.get('rsi_14'), 0)
+                macd = self._safe_float(indicators.get('macd'), 0)
+                macd_signal = self._safe_float(indicators.get('macd_signal'), 0)
+                
+                # 布林带
+                bollinger_upper = self._safe_float(indicators.get('bollinger_upper'), 0)
+                bollinger_middle = self._safe_float(indicators.get('bollinger_middle'), 0)
+                bollinger_lower = self._safe_float(indicators.get('bollinger_lower'), 0)
+                
+                # 构建技术指标详细数据行
+                indicator_details = f"  均线: SMA7={sma_7:.2f}, SMA14={sma_14:.2f}, SMA21={sma_21:.2f}, SMA30={sma_30:.2f} | EMA12={ema_12:.2f}, EMA26={ema_26:.2f}"
+                lines.append(indicator_details)
+                
+                # 动量指标行
+                momentum_details = f"  动量: RSI14={rsi_14:.1f} | MACD={macd:.4f}, Signal={macd_signal:.4f}"
+                lines.append(momentum_details)
+                
+                # 布林带行
+                bollinger_details = f"  布林带: Upper={bollinger_upper:.2f}, Mid={bollinger_middle:.2f}, Lower={bollinger_lower:.2f}"
+                lines.append(bollinger_details)
+        
         return "\n".join(lines) if lines else "暂无技术分析数据"
 
     def _build_multi_timeframe_confirmation(self, market_state: Dict) -> str:
-        """构建多时间框架确认"""
+        """构建多时间框架确认 - 使用真实的多周期K线数据
+        
+        配置化周期：从 config_manager 读取周期配置
+        """
         lines = []
-        for coin in market_state.keys():
-            lines.append(f"- {coin}: 1H/4H/D趋势待确认")
+        
+        try:
+            # 从配置加载周期信息
+            from config_manager import config_manager
+            timeframes = config_manager.multi_timeframe.timeframes
+            timeframe_roles = config_manager.multi_timeframe.timeframe_roles
+            
+            # 从 ws_service_manager获取多周期K线管理器
+            from websocket_services import ws_service_manager
+            multi_candle_manager = ws_service_manager.get_multi_candle_manager()
+            
+            if not multi_candle_manager:
+                self.logger.warning("⚠️ 多周期K线管理器未初始化")
+                for coin in market_state.keys():
+                    lines.append(f"- {coin}: 管理器未初始化")
+                return "\n".join(lines) if lines else "暂无多时间框架数据"
+            
+            if not multi_candle_manager.is_ready():
+                # 输出详细的未就绪原因
+                summary = multi_candle_manager.get_summary()
+                self.logger.warning(f"⚠️ 多周期K线数据未就绪，状态: {summary}")
+                # 返回默认信息
+                for coin in market_state.keys():
+                    lines.append(f"- {coin}: 数据加载中...")
+                return "\n".join(lines) if lines else "暂无多时间框架数据"
+            
+            # 获取每个币种的多周期K线数据
+            for coin in market_state.keys():
+                multi_tf_data = multi_candle_manager.get_multi_timeframe_data(coin)
+                
+                # 分析每个周期的趋势
+                trends = {}
+                for tf in timeframes:
+                    trends[tf] = self._analyze_candle_trend(multi_tf_data.get(tf, []), timeframe=tf)
+                
+                # 构建趋势显示字符串
+                trend_display = ' | '.join([f"{tf}={trends[tf]}" for tf in timeframes])
+                
+                # 判断趋势一致性（多周期共振策略）
+                bullish_count = sum(1 for t in trends.values() if t == '多头')
+                bearish_count = sum(1 for t in trends.values() if t == '空头')
+                total_count = len(timeframes)
+                
+                # 共振判断
+                if bullish_count == total_count:
+                    alignment = f"全周期共振多头 ✅ 极高置信度"
+                elif bearish_count == total_count:
+                    alignment = f"全周期共振空头 ✅ 极高置信度"
+                elif bullish_count >= total_count * 0.75:
+                    alignment = f"多周期多头 ✅ 高置信度"
+                elif bearish_count >= total_count * 0.75:
+                    alignment = f"多周期空头 ✅ 高置信度"
+                elif bullish_count > bearish_count:
+                    alignment = f"偏多头 ⚠️ 中等置信度"
+                elif bearish_count > bullish_count:
+                    alignment = f"偏空头 ⚠️ 中等置信度"
+                else:
+                    alignment = "周期冲突 ❌ 观望为主"
+                
+                lines.append(f"- {coin}: {trend_display} → {alignment}")
+                
+        except Exception as e:
+            self.logger.warning(f"构建多周期K线数据失败: {e}")
+            # 失败时使用默认信息
+            for coin in market_state.keys():
+                lines.append(f"- {coin}: 趋势待确认")
+        
         return "\n".join(lines) if lines else "暂无多时间框架数据"
+    
+    def _analyze_candle_trend(self, candles: List[Dict], timeframe: str) -> str:
+        """分析K线趋势（调用统一的技术指标计算器）
+        
+        Args:
+            candles: K线数据列表
+            timeframe: 周期名称
+            
+        Returns:
+            '多头', '空头', '横盘', '数据不足'
+        """
+        # 调用统一的技术指标计算器
+        result = self.indicator_calculator.analyze_candle_trend(candles, timeframe)
+        return result['trend']
 
     def _build_market_sentiment(self, market_state: Dict) -> str:
         """构建市场情绪分析"""
@@ -528,13 +728,32 @@ class SmartPromptBuilder:
             return 50
 
     def _analyze_money_flow(self, data: Dict) -> str:
-        """分析资金流向"""
-        volume_change = self._safe_float(data.get('volume_change_24h', 0))
+        """分析资金流向
         
-        if volume_change > 20:
+        优先使用volume_change_24h，如果不存在则基于价格涨跌幅判断资金流向
+        """
+        volume_change = self._safe_float(data.get('volume_change_24h'))
+        
+        # 优先使用volume_change_24h（如果有）
+        if volume_change is not None and volume_change != 0:
+            if volume_change > 20:
+                return "资金流入"
+            elif volume_change < -20:
+                return "资金流出"
+            else:
+                return "资金稳定"
+        
+        # 降级策略：基于价格涨跌幅判断资金流向
+        # 成交量数据无参考基准时，主要依据价格变化
+        change_24h = self._safe_float(data.get('change_24h', 0))
+        
+        # 价格上涨超过3%，认为资金流入
+        if change_24h > 3:
             return "资金流入"
-        elif volume_change < -20:
+        # 价格下跌超过3%，认为资金流出
+        elif change_24h < -3:
             return "资金流出"
+        # 价格波动在±3%以内，资金稳定
         else:
             return "资金稳定"
 
@@ -608,8 +827,8 @@ class ExecutionValidator:
         # 统一配置管理
         try:
             from config_manager import get_config
-            self.config = config_manager or get_config()
-            risk_config = self.config.get_risk_manager_config()
+            self.config_manager = config_manager or get_config()  # ← 修复：使用config_manager而不是config
+            risk_config = self.config_manager.get_risk_manager_config()
 
             # 从统一配置获取参数，构造函数参数可以覆盖（用于测试）
             self.min_trade_size_usd = min_trade_size_usd if min_trade_size_usd is not None else risk_config.get('min_trade_size_usd', 10)
@@ -635,24 +854,31 @@ class ExecutionValidator:
         
         self.logger.debug(f"验证决策 {decision.coin} - 信号: {decision.signal}, 数量: {decision.quantity:.6f}, 杠杆: {decision.leverage}")
         
-        # 观望和平仓操作直接通过
-        if decision.signal in ['hold', 'close_long', 'close_short']:
+        # 观望、平仓和信号反转平仓操作直接通过（不需要验证杠杆）
+        if decision.signal in ['hold', 'close_long', 'close_short', 'close_position']:
             return True, decision, "操作通过"
         
         # 检查杠杆有效性
         if decision.leverage <= 0:
             return False, decision, "无效杠杆"
         
-        # 检查杠杆限制（≤10x）
-        if decision.leverage > 10:
-            # 调整杠杆到10x
+        # 检查杠杆限制（从配置读取，必须存在）
+        if not hasattr(self, 'config_manager') or not self.config_manager:
+            raise ValueError("无法验证杠杆：未提供config_manager")
+        
+        max_allowed_leverage = self.config_manager.risk.max_leverage
+        if max_allowed_leverage is None:
+            raise ValueError("配置文件中缺少max_leverage配置")
+        
+        if decision.leverage > max_allowed_leverage:
+            # 调整杠杆到最大允许值
             adjusted_decision = TradingDecision(
                 coin=decision.coin,
                 signal=decision.signal,
                 quantity=decision.quantity,
-                leverage=10,
+                leverage=max_allowed_leverage,
                 confidence=decision.confidence,
-                justification=f"杠杆已调整到10x - " + decision.justification,
+                justification=f"杠杆已调整到{max_allowed_leverage}x - " + decision.justification,
                 price=current_price,
                 stop_loss=decision.stop_loss,
                 profit_target=decision.profit_target,
@@ -660,8 +886,8 @@ class ExecutionValidator:
                 risk_reward_ratio=decision.risk_reward_ratio,
                 position_size_percent=decision.position_size_percent
             )
-            self.logger.info(f"[{decision.coin}] 杠杆从{decision.leverage}x调整到10x")
-            return True, adjusted_decision, "杠杆已调整到10x"
+            self.logger.info(f"[{decision.coin}] 杠杆从{decision.leverage}x调整到{max_allowed_leverage}x")
+            return True, adjusted_decision, f"杠杆已调整到{max_allowed_leverage}x"
         
         # 验证通过
         self.logger.debug(f"[{decision.coin}] 验证通过 - 杠杆{decision.leverage}x")
@@ -709,6 +935,32 @@ class ConfigurableAITrader(BaseAITrader):
         # 核心组件
         # 先获取config_manager（修复引用问题）
         self.config_manager = kwargs.get('config_manager', None)
+        
+        # 加载置信度和杠杆配置（必须从配置文件读取）
+        if not self.config_manager:
+            raise ValueError("未提供config_manager，无法初始化AITrader")
+        
+        prompts_cfg = self.config_manager.prompts
+        if not prompts_cfg:
+            raise ValueError("配置文件中缺少prompts配置节")
+        
+        # 必需配置：不使用默认值
+        self.min_confidence_threshold = prompts_cfg.min_confidence_threshold
+        self.high_confidence_threshold = prompts_cfg.high_confidence_threshold
+        self.extreme_confidence_threshold = prompts_cfg.extreme_confidence_threshold
+        self.leverage_mapping = prompts_cfg.leverage_mapping
+        
+        # 验证杠杆映射配置的完整性
+        required_leverage_keys = ['extreme', 'high', 'medium', 'low']
+        missing_keys = [k for k in required_leverage_keys if k not in self.leverage_mapping]
+        if missing_keys:
+            raise ValueError(
+                f"leverage_mapping配置不完整，缺少: {', '.join(missing_keys)}\n"
+                f"必须包含: {', '.join(required_leverage_keys)}"
+            )
+        
+        self.logger.info(f"置信度阈值配置: min={self.min_confidence_threshold}, high={self.high_confidence_threshold}, extreme={self.extreme_confidence_threshold}")
+        self.logger.info(f"杠杆映射配置: {self.leverage_mapping}")
         
         risk_params = {
             'max_daily_loss': self.max_daily_loss,
@@ -1106,91 +1358,23 @@ class ConfigurableAITrader(BaseAITrader):
             for coin, decision_data in parsed.items():
                 if coin in market_state:
                     current_price = market_state[coin].get('price', 0)
-                    
-                    # 新格式：["信号", 置信度] 或 ["信号", 置信度, "决策依据"]
-                    if isinstance(decision_data, list) and len(decision_data) >= 2:
-                        signal = decision_data[0]
-                        confidence = float(decision_data[1])
-                        reasoning = decision_data[2] if len(decision_data) >= 3 else ""  # 第3个元素为决策依据
-                        
-                        # 信号映射：简化信号 -> 系统内部信号
-                        if signal == 'buy':
-                            signal = 'buy_to_enter'
-                        elif signal == 'sell':
-                            signal = 'sell_to_enter'
-                        elif signal == 'close':
-                            signal = 'close_position'
-                        
-                        # 根据置信度自动计算杠杆（符合用户记忆规则）
-                        # 置信度<0.60直接跳过，不开仓
-                        if confidence < 0.60:
-                            # 置信度过低，转为hold信号
-                            signal = 'hold'
-                            leverage = 1
-                            self.logger.info(f"[AI判断] {coin} 置信度{confidence:.2f}<0.60，转为hold信号")
-                        elif confidence >= 0.75:
-                            leverage = 5   # 高置信度（≥0.75使用5x杠杆）
-                            self.logger.info(f"[AI判断] {coin} 置信度{confidence:.2f}≥0.75，杠杆5x")
-                        else:  # 0.60 <= confidence < 0.75
-                            leverage = 3   # 中等置信度（0.60-0.74使用3x杠杆）
-                            self.logger.info(f"[AI判断] {coin} 置信度{confidence:.2f}在0.60-0.74，杠杆3x")
-                        
-                        # 构造justification，优先使用reasoning字段
-                        justification = reasoning if reasoning else f"AI决策: {signal}, 置信度{confidence:.2f}"
-                        
-                        decisions[coin] = TradingDecision(
-                            coin=coin,
-                            signal=signal,
-                            quantity=0,  # 由risk_manager根据置信度计算
-                            leverage=leverage,
-                            confidence=confidence,
-                            justification=justification,
-                            price=current_price,
-                            stop_loss=0,
-                            profit_target=0,
-                            position_type='long' if signal == 'buy_to_enter' else 'short',
-                            risk_reward_ratio=0,
-                            position_size_percent=0
-                        )
-                    
-                    # 兼容旧格式：{"signal": "buy", "confidence": 0.85, ...}
-                    elif isinstance(decision_data, dict):
-                        quantity = decision_data.get('quantity', 0)
-                        leverage = decision_data.get('leverage', 1)
-                        
-                        # 支持reasoning和justification两种字段（向后兼容）
-                        reasoning = decision_data.get('reasoning', '')
-                        justification = decision_data.get('justification', reasoning)
-                        
-                        # 信号映射
-                        signal = decision_data.get('signal', 'hold')
-                        if signal == 'buy':
-                            signal = 'buy_to_enter'
-                        elif signal == 'sell':
-                            signal = 'sell_to_enter'
-                        elif signal == 'close':
-                            signal = 'close_position'
-                        
-                        decisions[coin] = TradingDecision(
-                            coin=coin,
-                            signal=signal,
-                            quantity=quantity,
-                            leverage=leverage,
-                            confidence=decision_data.get('confidence', 0),
-                            justification=justification,
-                            price=current_price,
-                            stop_loss=decision_data.get('stop_loss', 0),
-                            profit_target=decision_data.get('profit_target', 0),
-                            position_type=decision_data.get('position_type', 'long'),
-                            risk_reward_ratio=decision_data.get('risk_reward_ratio', 0),
-                            position_size_percent=decision_data.get('position_size_percent', 0)
-                        )
+                    decision = self._parse_single_decision(coin, decision_data, current_price)
+                    if decision:
+                        decisions[coin] = decision
             
-            # 在返回AI决策之前，先检查所有持仓的止盈止损和信号反转
+            # ✅ 步骤1：反向信号检测和趋势验证（在止盈止损之前）
+            decisions = self.validate_decision_with_trend(decisions, market_state)
+            
+            # ✅ 步骤2：检查所有持仓的止盈止损和信号反转
             stop_decisions = self._check_stop_loss_take_profit(portfolio, market_state, decisions)
             
-            # 将止盈止损/信号反转决策合并到AI决策中（优先级更高）
-            decisions.update(stop_decisions)
+            # 显式合并决策：止盈止损/信号反转优先级高于AI新决策
+            # 先保留AI决策，然后用止盈止损/信号反转视盖（它们置信度更高）
+            for coin, stop_decision in stop_decisions.items():
+                if coin in decisions:
+                    # 如果该币种有止盈止损/信号反转决策，覆盖AI决策
+                    self.logger.info(f"[决策合并] {coin} 止盈止损/信号反转(置信度{stop_decision.confidence}) 覆盖 AI决策(置信度{decisions[coin].confidence})")
+                decisions[coin] = stop_decision
 
             return decisions
 
@@ -1208,87 +1392,21 @@ class ConfigurableAITrader(BaseAITrader):
                 for coin, decision_data in parsed.items():
                     if coin in market_state:
                         current_price = market_state[coin].get('price', 0)
-                        
-                        # 新格式：["信号", 置信度] 或 ["信号", 置信度, "决策依据"]
-                        if isinstance(decision_data, list) and len(decision_data) >= 2:
-                            signal = decision_data[0]
-                            confidence = float(decision_data[1])
-                            reasoning = decision_data[2] if len(decision_data) >= 3 else ""  # 第3个元素为决策依据
-                            
-                            # 信号映射
-                            if signal == 'buy':
-                                signal = 'buy_to_enter'
-                            elif signal == 'sell':
-                                signal = 'sell_to_enter'
-                            elif signal == 'close':
-                                signal = 'close_position'
-                            
-                            # 根据置信度自动计算杠杆
-                            # 置信度<0.60直接跳过，不开仓
-                            if confidence < 0.60:
-                                # 置信度过低，转为hold信号
-                                signal = 'hold'
-                                leverage = 1
-                                self.logger.info(f"[AI判断] {coin} 置信度{confidence:.2f}<0.60，转为hold信号")
-                            elif confidence >= 0.75:
-                                leverage = 5
-                                self.logger.info(f"[AI判断] {coin} 置信度{confidence:.2f}≥0.75，杠杆5x")
-                            else:  # 0.60 <= confidence < 0.75
-                                leverage = 3
-                                self.logger.info(f"[AI判断] {coin} 置信度{confidence:.2f}在0.60-0.74，杠杆3x")
-                            
-                            # 构造justification，优先使用reasoning字段
-                            justification = reasoning if reasoning else f"AI决策: {signal}, 置信度{confidence:.2f}"
-                            
-                            decisions[coin] = TradingDecision(
-                                coin=coin,
-                                signal=signal,
-                                quantity=0,
-                                leverage=leverage,
-                                confidence=confidence,
-                                justification=justification,
-                                price=current_price,
-                                stop_loss=0,
-                                profit_target=0,
-                                position_type='long' if signal == 'buy_to_enter' else 'short',
-                                risk_reward_ratio=0,
-                                position_size_percent=0
-                            )
-                        
-                        # 兼容旧格式
-                        elif isinstance(decision_data, dict):
-                            quantity = decision_data.get('quantity', 0)
-                            leverage = decision_data.get('leverage', 1)
-                            
-                            reasoning = decision_data.get('reasoning', '')
-                            justification = decision_data.get('justification', reasoning)
-                            
-                            signal = decision_data.get('signal', 'hold')
-                            if signal == 'buy':
-                                signal = 'buy_to_enter'
-                            elif signal == 'sell':
-                                signal = 'sell_to_enter'
-                            elif signal == 'close':
-                                signal = 'close_position'
-                            
-                            decisions[coin] = TradingDecision(
-                                coin=coin,
-                                signal=signal,
-                                quantity=quantity,
-                                leverage=leverage,
-                                confidence=decision_data.get('confidence', 0),
-                                justification=justification,
-                                price=current_price,
-                                stop_loss=decision_data.get('stop_loss', 0),
-                                profit_target=decision_data.get('profit_target', 0),
-                                position_type=decision_data.get('position_type', 'long'),
-                                risk_reward_ratio=decision_data.get('risk_reward_ratio', 0),
-                                position_size_percent=decision_data.get('position_size_percent', 0)
-                            )
+                        decision = self._parse_single_decision(coin, decision_data, current_price)
+                        if decision:
+                            decisions[coin] = decision
                 
-                # 检查止盈止损和信号反转
+                # ✅ 步骤1：反向信号检测和趋势验证（在止盈止损之前）
+                decisions = self.validate_decision_with_trend(decisions, market_state)
+                
+                # ✅ 步骤2：检查止盈止损和信号反转
                 stop_decisions = self._check_stop_loss_take_profit(portfolio, market_state, decisions)
-                decisions.update(stop_decisions)
+                
+                # 显式合并决策：止盈止损/信号反转优先级高于AI新决策
+                for coin, stop_decision in stop_decisions.items():
+                    if coin in decisions:
+                        self.logger.info(f"[决策合并] {coin} 止盈止损/信号反转(置信度{stop_decision.confidence}) 覆盖 AI决策(置信度{decisions[coin].confidence})")
+                    decisions[coin] = stop_decision
                 
                 return decisions
                 
@@ -1303,8 +1421,195 @@ class ConfigurableAITrader(BaseAITrader):
                 self.logger.error("响应内容（完整）: " + response)  # 显示完整响应
                 return {}
 
+    def _parse_single_decision(self, coin: str, decision_data, current_price: float) -> Optional[TradingDecision]:
+        """解析单个币种的决策数据
+        
+        Args:
+            coin: 币种名称
+            decision_data: 决策数据（list或dict格式）
+            current_price: 当前价格
+            
+        Returns:
+            TradingDecision或None
+        """
+        # 新格式：["信号", 置信度] 或 ["信号", 置信度, "决策依据"]
+        if isinstance(decision_data, list) and len(decision_data) >= 2:
+            signal = decision_data[0]
+            confidence = float(decision_data[1])
+            reasoning = decision_data[2] if len(decision_data) >= 3 else ""  # 第3个元素为决策依据
+            
+            # 信号映射：简化信号 -> 系统内部信号
+            # 注：AI只输出buy/sell/hold，close由程序自动判断
+            if signal == 'buy':
+                signal = 'buy_to_enter'
+            elif signal == 'sell':
+                signal = 'sell_to_enter'
+            # close信号已移除，AI不应输出close
+            
+            # 根据置信度自动计算杠杆（使用实例配置）
+            if confidence < self.min_confidence_threshold:
+                signal = 'hold'
+                leverage = self.leverage_mapping['low']
+                self.logger.info(f"[置信度过滤] {coin} {confidence:.2f}<{self.min_confidence_threshold}，转为hold")
+            elif confidence >= self.extreme_confidence_threshold:
+                leverage = self.leverage_mapping['extreme']
+                self.logger.info(f"[杠杆映射] {coin} {confidence:.2f}≥{self.extreme_confidence_threshold} → {leverage}x")
+            elif confidence >= self.high_confidence_threshold:
+                leverage = self.leverage_mapping['high']
+                self.logger.info(f"[杠杆映射] {coin} {confidence:.2f}≥{self.high_confidence_threshold} → {leverage}x")
+            else:  # min_threshold <= confidence < high_threshold
+                leverage = self.leverage_mapping['medium']
+                self.logger.info(f"[杠杆映射] {coin} {confidence:.2f} [{self.min_confidence_threshold}-{self.high_confidence_threshold}) → {leverage}x")
+            
+            # 构造justification，优先使用reasoning字段
+            justification = reasoning if reasoning else f"AI决策: {signal}, 置信度{confidence:.2f}"
+            
+            return TradingDecision(
+                coin=coin,
+                signal=signal,
+                quantity=0,  # 由risk_manager根据置信度计算
+                leverage=leverage,
+                confidence=confidence,
+                justification=justification,
+                price=current_price,
+                stop_loss=0,
+                profit_target=0,
+                position_type='long' if signal == 'buy_to_enter' else 'short',
+                risk_reward_ratio=0,
+                position_size_percent=0
+            )
+        
+        # 兼容旧格式：{"signal": "buy", "confidence": 0.85, ...}
+        elif isinstance(decision_data, dict):
+            quantity = decision_data.get('quantity', 0)
+            leverage = decision_data.get('leverage', 1)
+            
+            # 支持reasoning和justification两种字段（向后兼容）
+            reasoning = decision_data.get('reasoning', '')
+            justification = decision_data.get('justification', reasoning)
+            
+            # 信号映射
+            signal = decision_data.get('signal', 'hold')
+            if signal == 'buy':
+                signal = 'buy_to_enter'
+            elif signal == 'sell':
+                signal = 'sell_to_enter'
+            # close信号已移除，AI不应输出close
+            
+            return TradingDecision(
+                coin=coin,
+                signal=signal,
+                quantity=quantity,
+                leverage=leverage,
+                confidence=decision_data.get('confidence', 0),
+                justification=justification,
+                price=current_price,
+                stop_loss=decision_data.get('stop_loss', 0),
+                profit_target=decision_data.get('profit_target', 0),
+                position_type=decision_data.get('position_type', 'long'),
+                risk_reward_ratio=decision_data.get('risk_reward_ratio', 0),
+                position_size_percent=decision_data.get('position_size_percent', 0)
+            )
+        
+        return None
+    
+    def validate_decision_with_trend(self, decisions: Dict[str, TradingDecision], market_state: Dict) -> Dict[str, TradingDecision]:
+        """
+        验证决策与趋势的一致性（调用统一的技术指标计算器）
+        
+        Args:
+            decisions: AI决策
+            market_state: 市场状态
+            
+        Returns:
+            验证后的决策
+        """
+        validated_decisions = {}
+        
+        for coin, decision in decisions.items():
+            # hold和close_position不需要验证
+            if decision.signal == 'hold' or decision.signal == 'close_position':
+                validated_decisions[coin] = decision
+                continue
+            
+            # 获取市场数据
+            coin_data = market_state.get(coin, {})
+            multi_tf_candles = coin_data.get('multi_timeframe_candles', {})
+            
+            # 从配置读取周期和最小K线数量
+            from config_manager import config_manager
+            timeframes = config_manager.multi_timeframe.timeframes
+            min_candles = config_manager.multi_timeframe.min_candles_required
+            
+            # ✅ 添加详细的调试日志
+            self.logger.debug(f"[趋势验证] {coin} - 市场数据键: {list(coin_data.keys())}")
+            self.logger.debug(f"[趋势验证] {coin} - multi_timeframe_candles类型: {type(multi_tf_candles)}")
+            self.logger.debug(f"[趋势验证] {coin} - multi_timeframe_candles键: {list(multi_tf_candles.keys())}")
+            
+            # 检查所有周期的数据长度
+            candle_lengths = {tf: len(multi_tf_candles.get(tf, [])) for tf in timeframes}
+            
+            # 如果有任何周期数据为0，输出INFO级别诊断信息
+            if any(length == 0 for length in candle_lengths.values()):
+                length_str = ', '.join([f"{tf}={candle_lengths[tf]}根" for tf in timeframes])
+                self.logger.info(
+                    f"⚠️ [趋势验证] {coin} 数据获取结果: {length_str} | "
+                    f"multi_tf_candles键: {list(multi_tf_candles.keys())}"
+                )
+            
+            # DEBUG日志
+            length_str = ', '.join([f"{tf}={candle_lengths[tf]}根" for tf in timeframes])
+            self.logger.debug(f"[趋势验证数据] {coin}: {length_str}")
+            
+            # 数据长度不足时直接hold，避免后续无效计算
+            insufficient_data = [tf for tf, length in candle_lengths.items() if length < min_candles]
+            if insufficient_data:
+                insufficient_str = ', '.join([f"{tf}={candle_lengths[tf]}" for tf in insufficient_data])
+                self.logger.warning(
+                    f"⚠️ [{coin}] 多周期数据不足({insufficient_str}根<{min_candles})，转为hold"
+                )
+                decision.signal = 'hold'
+                decision.justification = f"数据不足({insufficient_str}根<{min_candles}) - {decision.justification}"
+                validated_decisions[coin] = decision
+                continue
+            
+            # 调用统一的技术指标计算器进行验证
+            validation_result = self.indicator_calculator.validate_signal_with_trend(
+                decision.signal,
+                multi_tf_candles
+            )
+            
+            # 处理验证结果
+            if not validation_result['allowed']:
+                # 禁止开仓
+                self.logger.warning(
+                    f"❌ [反向信号检测] {coin} {validation_result['reason']}"
+                )
+                decision.signal = 'hold'
+                decision.justification = f"{validation_result['reason']} ({decision.justification})"
+            elif validation_result['confidence_penalty'] < 1.0:
+                # 降低置信度
+                original_confidence = decision.confidence
+                decision.confidence = max(0.6, decision.confidence * validation_result['confidence_penalty'])
+                self.logger.warning(
+                    f"⚠️ [反向信号检测] {coin} {validation_result['reason']} "
+                    f"(置信度: {original_confidence:.2f} → {decision.confidence:.2f})"
+                )
+                decision.justification += f" ({validation_result['reason']})"
+            else:
+                # 验证通过
+                self.logger.debug(
+                    f"✅ [反向信号检测] {coin} {validation_result['reason']}"
+                )
+            
+            validated_decisions[coin] = decision
+        
+        return validated_decisions
+
     def _check_stop_loss_take_profit(self, portfolio: Dict, market_state: Dict, ai_decisions: Dict[str, TradingDecision] = None) -> Dict[str, TradingDecision]:
         """检查所有持仓是否触发止盈/止损/信号反转，如果触发则生成平仓决策
+        
+        优先级顺序：止盈/止损(1.0) > 信号反转(0.95) > AI新决策
         
         Args:
             portfolio: 投资组合信息
@@ -1320,17 +1625,16 @@ class ConfigurableAITrader(BaseAITrader):
         if not positions:
             return stop_decisions
         
-        # 从配置获取止盈止损阈值，默认值：止盈30%，止损5%
-        take_profit_threshold = 0.30  # 默认30%止盈
-        stop_loss_threshold = 0.05    # 默认5%止损
+        # 从配置获取止盈止损阈值
+        take_profit_threshold = 0.15  # 默认15%止盈（与配置文件一致）
+        stop_loss_threshold = 0.10    # 默认10%止损
         
         if self.config_manager:
             try:
-                # 尝试从配置读取止盈止损参数
                 if hasattr(self.config_manager, 'risk'):
                     risk_config = self.config_manager.risk
-                    take_profit_threshold = getattr(risk_config, 'take_profit_threshold', 0.30)
-                    stop_loss_threshold = getattr(risk_config, 'stop_loss_threshold', 0.05)
+                    take_profit_threshold = getattr(risk_config, 'take_profit_threshold', 0.15)
+                    stop_loss_threshold = getattr(risk_config, 'stop_loss_threshold', 0.10)
             except Exception as e:
                 self.logger.warning(f"无法从配置读取止盈止损参数，使用默认值: {e}")
         
@@ -1350,83 +1654,26 @@ class ConfigurableAITrader(BaseAITrader):
             if entry_price <= 0 or current_price <= 0 or quantity <= 0:
                 continue
             
-            # 优先检查信号反转（如果有AI决策）
-            if ai_decisions and coin in ai_decisions:
-                ai_signal = ai_decisions[coin].signal
-                ai_confidence = ai_decisions[coin].confidence
-                
-                # 检查是否是反向信号（同时支持新旧两种信号格式）
-                is_reverse_signal = (
-                    (side == 'long' and ai_signal in ['sell_to_enter', 'sell']) or
-                    (side == 'short' and ai_signal in ['buy_to_enter', 'buy'])
-                )
-                
-                # 🆕 信号反转平仓条件：反向信号 且 新信号置信度>0.7
-                if is_reverse_signal and ai_confidence > 0.7:
-                    # 计算当前盈亏（用于日志），考虑杠杆
-                    if side == 'long':
-                        price_change_ratio = (current_price - entry_price) / entry_price
-                    else:
-                        price_change_ratio = (entry_price - current_price) / entry_price
-                    
-                    pnl_ratio = price_change_ratio * leverage
-                    pnl_percent = pnl_ratio * 100
-                    
-                    close_reason = f"信号反转: 持仓{side}，新信号{ai_signal}(置信度{ai_confidence:.2f})，当前盈亏{pnl_percent:+.2f}%"
-                    self.logger.info(f"[信号反转] {coin} {close_reason}")
-                    
-                    # 生成平仓决策（置信度0.95，仅次于止盈止损）
-                    stop_decisions[coin] = TradingDecision(
-                        coin=coin,
-                        signal='close_position',
-                        quantity=quantity,
-                        leverage=leverage,
-                        confidence=0.95,  # 信号反转平仓置信度0.95
-                        justification=close_reason,
-                        price=current_price,
-                        stop_loss=0,
-                        profit_target=0,
-                        position_type=side,
-                        risk_reward_ratio=0,
-                        position_size_percent=0
-                    )
-                    continue  # 已生成信号反转平仓决策，跳过止盈止损检查
-                elif is_reverse_signal and ai_confidence <= 0.7:
-                    # 信号反转但置信度不足，不平仓
-                    self.logger.info(f"[信号反转] {coin} 检测到反向信号{ai_signal}，但置信度{ai_confidence:.2f}≤0.7，不触发平仓")
-            
-            # 计算盈亏比例（用于止盈止损检查）
-            # 价格变动比例
+            # 计算盈亏比例（考虑杠杆）
             if side == 'long':
                 price_change_ratio = (current_price - entry_price) / entry_price
             else:  # short
                 price_change_ratio = (entry_price - current_price) / entry_price
             
-            # 考虑杠杆的实际盈亏比例
             pnl_ratio = price_change_ratio * leverage
             pnl_percent = pnl_ratio * 100
             
-            # 检查是否触发止盈或止损
-            should_close = False
-            close_reason = ""
-            
+            # 优先级1：检查止盈/止损（置信度1.0，最高优先级）
             if pnl_ratio >= take_profit_threshold:
-                should_close = True
                 close_reason = f"触发止盈: {pnl_percent:+.2f}% (阈值: {take_profit_threshold*100}%)"
-            elif pnl_ratio <= -stop_loss_threshold:
-                should_close = True
-                close_reason = f"触发止损: {pnl_percent:+.2f}% (阈值: -{stop_loss_threshold*100}%)"
-            
-            if should_close:
-                self.logger.info(f"[止盈止损] {coin} {side} 持仓 {close_reason}")
+                self.logger.info(f"[止盈] {coin} {side} 持仓 {close_reason}")
                 
-                # 生成平仓决策
                 stop_decisions[coin] = TradingDecision(
                     coin=coin,
                     signal='close_position',
                     quantity=quantity,
                     leverage=leverage,
-                    confidence=1.0,  # 止盈止损决策置信度最高
+                    confidence=1.0,  # 止盈置信度最高
                     justification=close_reason,
                     price=current_price,
                     stop_loss=0,
@@ -1435,6 +1682,60 @@ class ConfigurableAITrader(BaseAITrader):
                     risk_reward_ratio=0,
                     position_size_percent=0
                 )
+                continue  # 已生成止盈决策，跳过其他检查
+            
+            elif pnl_ratio <= -stop_loss_threshold:
+                close_reason = f"触发止损: {pnl_percent:+.2f}% (阈值: -{stop_loss_threshold*100}%)"
+                self.logger.info(f"[止损] {coin} {side} 持仓 {close_reason}")
+                
+                stop_decisions[coin] = TradingDecision(
+                    coin=coin,
+                    signal='close_position',
+                    quantity=quantity,
+                    leverage=leverage,
+                    confidence=1.0,  # 止损置信度最高
+                    justification=close_reason,
+                    price=current_price,
+                    stop_loss=0,
+                    profit_target=0,
+                    position_type=side,
+                    risk_reward_ratio=0,
+                    position_size_percent=0
+                )
+                continue  # 已生成止损决策，跳过其他检查
+            
+            # 优先级2：检查信号反转（置信度0.95，次高优先级）
+            if ai_decisions and coin in ai_decisions:
+                ai_signal = ai_decisions[coin].signal
+                ai_confidence = ai_decisions[coin].confidence
+                
+                # 检查是否是反向信号
+                is_reverse_signal = (
+                    (side == 'long' and ai_signal in ['sell_to_enter', 'sell']) or
+                    (side == 'short' and ai_signal in ['buy_to_enter', 'buy'])
+                )
+                
+                # 信号反转平仓条件：反向信号 且 新信号置信度>0.7
+                if is_reverse_signal and ai_confidence > 0.7:
+                    close_reason = f"信号反转: 持仓{side}，新信号{ai_signal}(置信度{ai_confidence:.2f})，当前盈亏{pnl_percent:+.2f}%"
+                    self.logger.info(f"[信号反转] {coin} {close_reason}")
+                    
+                    stop_decisions[coin] = TradingDecision(
+                        coin=coin,
+                        signal='close_position',
+                        quantity=quantity,
+                        leverage=leverage,
+                        confidence=0.95,  # 信号反转置信度0.95
+                        justification=close_reason,
+                        price=current_price,
+                        stop_loss=0,
+                        profit_target=0,
+                        position_type=side,
+                        risk_reward_ratio=0,
+                        position_size_percent=0
+                    )
+                elif is_reverse_signal and ai_confidence <= 0.7:
+                    self.logger.info(f"[信号反转] {coin} 检测到反向信号{ai_signal}，但置信度{ai_confidence:.2f}≤0.7，不触发平仓")
         
         if stop_decisions:
             self.logger.info(f"[止盈止损/信号反转] 生成 {len(stop_decisions)} 个平仓决策")

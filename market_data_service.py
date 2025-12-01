@@ -60,19 +60,18 @@ class AsyncMarketDataFetcher:
         self._price_cache: OrderedDict = OrderedDict()
         self._indicators_cache: OrderedDict = OrderedDict()
         self._historical_cache: OrderedDict = OrderedDict()
-        self._max_cache_size = 50  # 最大缓存币种数量
         
         # 获取配置
         self.config = get_config()
         self.cache_ttl = self.config.cache
+        self._max_cache_size = self.config.cache.max_cache_size  # 最大缓存币种数量
         # 从配置获取超时时间
         self.api_timeout = self.config.trading.api_timeout_seconds
         
-        # K线数据池限制（滚动窗口机制，从配置读取）
-        self._max_kline_length = self.cache_ttl.max_kline_length  # 每个币种最多保留K线数
-        self._min_kline_length = self.cache_ttl.min_kline_length  # 最小保留K线数
+        # K线数据池限制（滚动窗口机制，从多周期配置读取）
+        self._max_kline_length = self.config.multi_timeframe.max_candles_per_symbol  # 每个币种每个周期最多保留K线数
 
-        # 创建session（作为fallback）
+        # 创建session（启动时执行HTTP一次性请求）
         self.session = self._create_session()
         self.logger = logging.getLogger(__name__)
 
@@ -81,13 +80,12 @@ class AsyncMarketDataFetcher:
         
         # 打印K线数据池配置
         self.logger.info(
-            f"K线数据池已启用 - 最大长度: {self._max_kline_length}根/币种, "
-            f"最小保留: {self._min_kline_length}根, "
-            f"支持币种数: {self._max_cache_size}"
+            f"K线数据池已启用 - 最大长度: {self._max_kline_length}根/币种/周期"
         )
 
+
     def _create_session(self):
-        """创建优化的HTTP session"""
+        """创建HTTP session - 大型HTTP连接池（不是WebSocket每次重新创建）"""
         session = requests.Session()
 
         # 配置重试策略
@@ -97,10 +95,11 @@ class AsyncMarketDataFetcher:
             status_forcelist=[429, 500, 502, 503, 504],
         )
 
+        # 配置较大的连接池，不要扫描器满
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
-            pool_connections=10,  # 10个连接池足够，关键是要正确释放连接
-            pool_maxsize=20      # 最大连接数
+            pool_connections=100,  # 扩大连接池，不要爆满
+            pool_maxsize=200      # 最大连接数
         )
 
         session.mount("http://", adapter)
@@ -227,6 +226,7 @@ class AsyncMarketDataFetcher:
             if not okx_symbol:
                 return {'price': 0}
             
+            # 直接使用requests.get，不使用连接池
             response = self.session.get(
                 f"{self.okx_base_url}/ticker",
                 params={'instId': okx_symbol},
@@ -260,6 +260,11 @@ class AsyncMarketDataFetcher:
                         data = response.json()
                         if data.get('code') == '0' and data.get('data'):
                             ticker = data['data'][0]
+                            
+                            # 🔍 调试日志：打印OKX ticker API返回的所有字段（DEBUG级别）
+                            self.logger.debug(f"[OKX Ticker] {symbol} 完整字段: {list(ticker.keys())}")
+                            self.logger.debug(f"[OKX Ticker] {symbol} 完整数据: {ticker}")
+                            
                             # OKX需要手动计算涨跌幅: (last - open24h) / open24h * 100
                             last_price = float(ticker.get('last', 0))
                             open_24h = float(ticker.get('open24h', 0))
@@ -267,12 +272,21 @@ class AsyncMarketDataFetcher:
                             if open_24h > 0:
                                 change_24h = ((last_price - open_24h) / open_24h) * 100
                             
-                            return {
+                            # 尝试获取成交量变化数据（如果存在）
+                            volume_24h = float(ticker.get('vol24h', 0))
+                            volume_ccy_24h = float(ticker.get('volCcy24h', 0))  # 按币种计价的成交量
+                            
+                            result = {
                                 'change_24h': change_24h,
-                                'volume_24h': float(ticker.get('vol24h', 0)),
+                                'volume_24h': volume_24h,
                                 'high_24h': float(ticker.get('high24h', 0)),
                                 'low_24h': float(ticker.get('low24h', 0))
                             }
+                            
+                            # 记录提取的数据（DEBUG级别）
+                            self.logger.debug(f"[OKX Ticker] {symbol} 提取数据: {result}")
+                            
+                            return result
                 finally:
                     response.close()  # 确保关闭连接
         except Exception as e:
@@ -292,6 +306,10 @@ class AsyncMarketDataFetcher:
             # 使用OKX K线 API获取历史数据
             okx_symbol = self.okx_symbols.get(symbol)
             if okx_symbol:
+                # 从配置读取历史数据周期
+                from config_manager import config_manager
+                timeframe = config_manager.multi_timeframe.timeframes[0]  # 使用最短周期
+                
                 # OKX K线 API: /api/v5/market/candles
                 # bar: 1m, 5m, 15m, 30m, 1H, 4H, 1D
                 # limit: 最大300条
@@ -299,10 +317,11 @@ class AsyncMarketDataFetcher:
                     f"{self.okx_base_url}/candles",
                     params={
                         'instId': okx_symbol,
-                        'bar': '1H',  # 1小时K线
+                        'bar': timeframe,
                         'limit': min(limit, 300)  # OKX最多返回300条
                     },
-                    timeout=10
+                    timeout=self.api_timeout,  # 从配置读取超时时间
+                    verify=False
                 )
                 
                 try:
@@ -574,10 +593,10 @@ class AsyncMarketDataFetcher:
                     'status': 'success'
                 }
 
-            # 使用线程池获取历史数据，减少超时时间
+            # 使用线程池获取历史数据
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(self._fetch_historical_data, symbol, 50)
-                historical_data = future.result(timeout=10)  # 减少超时时间
+                historical_data = future.result(timeout=self.api_timeout)  # 从配置读取超时时间
 
             # 如果没有足够的历史数据，返回基本指标（参考原始代码）
             if not historical_data or len(historical_data) < 7:
@@ -662,7 +681,6 @@ class AsyncMarketDataFetcher:
             'total_klines': total_klines,  # 总K线数量
             'kline_details': kline_details,  # 每个币种的K线数量
             'max_kline_length': self._max_kline_length,  # K线池最大限制
-            'min_kline_length': self._min_kline_length,  # 最小保留数量
             'max_workers': self.max_workers
         }
 

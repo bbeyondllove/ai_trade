@@ -44,37 +44,33 @@ class RiskManager:
             self.config = config_manager or get_config()
             risk_config = self.config.get_risk_manager_config()
 
-            # 从统一配置获取参数，kwargs可以覆盖（用于测试）
-            self.max_daily_loss = kwargs.get('max_daily_loss', risk_config.get('max_daily_loss', 0.05))
-            self.max_position_size = kwargs.get('max_position_size', risk_config.get('max_position_size', 0.5))
-            self.max_leverage = kwargs.get('max_leverage', risk_config.get('max_leverage', 10))
-            self.max_drawdown = kwargs.get('max_drawdown', risk_config.get('max_drawdown', 0.15))
-            self.max_portfolio_risk = kwargs.get('max_portfolio_risk', risk_config.get('max_portfolio_risk', 0.5))
-            self.min_trade_size_usd = kwargs.get('min_trade_size_usd', risk_config.get('min_trade_size_usd', 10))
-            self.max_positions = kwargs.get('max_positions', risk_config.get('max_positions', 5))
-            # 从配置中获取币种列表
-            self.coins = kwargs.get('monitored_coins', risk_config.get('monitored_coins'))
+            # 从统一配置获取参数（不使用默认值）
+            self.max_daily_loss = kwargs.get('max_daily_loss', risk_config['max_daily_loss'])
+            self.max_position_size = kwargs.get('max_position_size', risk_config['max_position_size'])
+            self.max_leverage = kwargs.get('max_leverage', risk_config['max_leverage'])
+            self.max_drawdown = kwargs.get('max_drawdown', risk_config['max_drawdown'])
+            self.max_portfolio_risk = kwargs.get('max_portfolio_risk', risk_config['max_portfolio_risk'])
+            self.min_trade_size_usd = kwargs.get('min_trade_size_usd', risk_config['min_trade_size_usd'])
+            self.max_positions = kwargs.get('max_positions', risk_config['max_positions'])
             
-            # 如果没有配置币种列表，抛出错误
+            # 币种列表：必须配置
+            self.coins = kwargs.get('monitored_coins', risk_config['monitored_coins'])
             if not self.coins:
-                raise ValueError("No monitored coins configured in risk manager")
+                raise ValueError(
+                    "monitored_coins未配置！\n"
+                    "请在trading_config.json的risk节中配置monitored_coins字段"
+                )
 
+        except KeyError as e:
+            raise ValueError(
+                f"配置文件缺少必需的risk配置项: {e}\n"
+                f"请检查trading_config.json的risk节是否包含所有必需字段"
+            )
         except Exception as e:
-            # 回退到kwargs（如果配置读取失败）
-            self.max_daily_loss = kwargs.get('max_daily_loss', 0.05)
-            self.max_position_size = kwargs.get('max_position_size', 0.5)
-            self.max_leverage = kwargs.get('max_leverage', 10)
-            self.max_drawdown = kwargs.get('max_drawdown', 0.15)
-            self.max_portfolio_risk = kwargs.get('max_portfolio_risk', 0.5)
-            self.min_trade_size_usd = kwargs.get('min_trade_size_usd', 10)
-            self.max_positions = kwargs.get('max_positions', 5)
-            self.coins = kwargs.get('monitored_coins')
-            
-            # 如果没有配置币种列表，抛出错误
-            if not self.coins:
-                raise ValueError("No monitored coins configured in risk manager")
-                
-            print(f"Warning: Failed to load config for RiskManager, using defaults: {e}")
+            raise RuntimeError(
+                f"RiskManager初始化失败: {e}\n"
+                f"请检查配置文件是否正确"
+            )
 
         # 状态跟踪
         self.daily_pnl = 0.0

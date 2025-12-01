@@ -77,7 +77,7 @@ class EnhancedTradingEngine:
         from collections import OrderedDict
         self._price_cache: OrderedDict = OrderedDict()
         self._cache_ttl = self.config.cache.price_cache_ttl
-        self._max_cache_size = 20  # 最多缓存20个币种的价格
+        self._max_cache_size = self.config.cache.max_cache_size  # 最多缓存币种的价格
 
         # 日志
         self.logger = logging.getLogger(f"{__name__}.{self.model_id}")
@@ -139,6 +139,26 @@ class EnhancedTradingEngine:
             if not risk_check['approved']:
                 self.logger.warning(f"[{cycle_id}] Risk check failed: {risk_check}")
                 return self._create_error_result("Risk check failed", cycle_start_time, risk_check)
+            
+            # ✅ 检查多周期K线数据是否就绪（必须在AI决策前检查）
+            try:
+                from websocket_services import ws_service_manager
+                multi_candle_manager = ws_service_manager.get_multi_candle_manager()
+                
+                if multi_candle_manager and not multi_candle_manager.is_ready():
+                    summary = multi_candle_manager.get_summary()
+                    self.logger.warning(f"[{cycle_id}] 多周期K线数据未就绪，跳过本周期决策: {summary}")
+                    return {
+                        'success': True,
+                        'cycle_id': cycle_id,
+                        'cycle_time': time.time() - cycle_start_time,
+                        'skipped': True,
+                        'reason': '多周期K线数据未就绪',
+                        'summary': summary
+                    }
+            except Exception as e:
+                self.logger.warning(f"[{cycle_id}] 检查多周期K线状态失败: {e}")
+                # 如果检查失败，继续执行（容错处理）
 
             # 获取AI决策
             decisions = self._get_ai_decisions_with_retry(market_state, portfolio, cycle_id)
@@ -255,6 +275,26 @@ class EnhancedTradingEngine:
                 self.logger.warning(f"Failed to get technical indicators: {e}")
                 # 继续执行，技术指标失败不影响交易
 
+            # ✅ 添加多周期K线数据到市场状态中
+            try:
+                from websocket_services import ws_service_manager
+                multi_candle_manager = ws_service_manager.get_multi_candle_manager()
+                
+                if multi_candle_manager:
+                    self.logger.debug(f"[MarketState] 开始添加多周期K线数据，币种数量: {len(coins)}")
+                    for coin in coins:
+                        multi_tf_data = multi_candle_manager.get_multi_timeframe_data(coin)
+                        market_state[coin]['multi_timeframe_candles'] = multi_tf_data
+                        # 记录每个币种的多周期数据详情
+                        tf_details = {tf: len(candles) for tf, candles in multi_tf_data.items()}
+                        self.logger.debug(f"[MarketState] {coin} 多周期数据详情: {tf_details}")
+                    self.logger.debug("[MarketState] 多周期K线数据添加完成")
+                else:
+                    self.logger.warning("Multi-timeframe candle manager not available")
+            except Exception as e:
+                self.logger.error(f"Failed to add multi-timeframe candles to market state: {e}")
+                # 继续执行，多周期数据失败不影响交易
+
             # 更新缓存 (LRU策略)
             # 如果存在，先删除
             if cache_key in self._price_cache:
@@ -266,6 +306,13 @@ class EnhancedTradingEngine:
             # 清理过多的缓存（保留最近的）
             if len(self._price_cache) > self._max_cache_size:
                 self._price_cache.popitem(last=False)
+
+            # ✅ 添加市场状态数据的最终检查日志
+            self.logger.debug(f"[MarketState] 构建完成，包含 {len(market_state)} 个币种的数据")
+            for coin, data in market_state.items():
+                has_multi_tf = 'multi_timeframe_candles' in data
+                tf_count = len(data.get('multi_timeframe_candles', {})) if has_multi_tf else 0
+                self.logger.debug(f"[MarketState] {coin} - 价格: {data['price']}, 多周期数据: {has_multi_tf} ({tf_count}个周期)")
 
             return market_state
 
@@ -892,8 +939,13 @@ class EnhancedTradingEngine:
                 else:
                     self.logger.warning(f"[{cycle_id}] {coin} 反向平仓失败: {close_result.get('error')}")
         
-        # 2. 杠杆限制检查（从配置读取）
-        allowed_leverages = self.config.risk.allowed_leverages if hasattr(self.config, 'risk') else [3, 5, 10]
+        # 2. 杠杆限制检查（必须从配置读取）
+        if not hasattr(self.config, 'risk'):
+            raise ValueError("配置缺岑risk节，无法获取allowed_leverages")
+        
+        allowed_leverages = self.config.risk.allowed_leverages
+        if not allowed_leverages:
+            raise ValueError("配置文件中缺岑allowed_leverages配置")
         if leverage not in allowed_leverages:
             leverage = min(allowed_leverages, key=lambda x: abs(x - leverage))
             if isinstance(decision, dict):
@@ -1548,16 +1600,6 @@ class EnhancedTradingEngine:
         try:
             # 重新获取最新的portfolio数据（包含最新的交易结果）
             updated_portfolio = self.db.get_portfolio(self.model_id, current_prices)
-            
-            # 记录账户价值快照（实盘和模拟盘都需要）
-            if updated_portfolio:
-                self.db.record_account_value(
-                    self.model_id,
-                    updated_portfolio.get('total_value', 0),
-                    updated_portfolio.get('cash', 0),
-                    updated_portfolio.get('positions_value', 0)
-                )
-                self.logger.debug(f"[{cycle_id}] 记录账户价值: ${updated_portfolio.get('total_value', 0):.2f}")
             
             return updated_portfolio if updated_portfolio else portfolio
         except Exception as e:

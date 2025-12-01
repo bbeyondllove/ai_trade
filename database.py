@@ -503,7 +503,7 @@ class Database:
     
     def add_trade(self, model_id: int, coin: str, signal: str, quantity: float,
               price: float, leverage: int = 1, side: str = 'long', pnl: float = 0, fee: float = 0, order_id: Optional[str] = None, message: Optional[str] = None):
-        """Add trade record with fee and optional order_id/message"""
+        """Add trade record with fee and optional order_id/message and notify WebSocket service"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
@@ -512,6 +512,20 @@ class Database:
         ''', (model_id, coin, signal, quantity, price, leverage, side, pnl, fee, order_id, message))
         conn.commit()
         conn.close()
+        
+        # 通知WebSocket服务更新交易缓存
+        try:
+            from websocket_services import ws_service_manager
+            trades_service = ws_service_manager.get_service('trades')
+            if trades_service:
+                # 更新缓存并广播
+                new_trades = self.get_trades(model_id, limit=50)
+                trades_service.update_trades_cache(model_id, new_trades)
+                # 异步广播更新
+                import asyncio
+                asyncio.create_task(trades_service.broadcast_trades_update(model_id))
+        except Exception as e:
+            print(f"[WARN] Failed to notify WebSocket service of trade update: {e}")
     
     def get_trades(self, model_id: int, limit: int = 50) -> List[Dict]:
         """Get trade history with model info (including is_live status)"""
@@ -535,7 +549,7 @@ class Database:
     
     def add_conversation(self, model_id: int, user_prompt: str, 
                         ai_response: str, cot_trace: str = ''):
-        """Add conversation record"""
+        """Add conversation record and notify WebSocket service"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
@@ -544,6 +558,20 @@ class Database:
         ''', (model_id, user_prompt, ai_response, cot_trace))
         conn.commit()
         conn.close()
+        
+        # 通知WebSocket服务更新对话缓存
+        try:
+            from websocket_services import ws_service_manager
+            conversations_service = ws_service_manager.get_service('conversations')
+            if conversations_service:
+                # 更新缓存并广播
+                new_conversations = self.get_conversations(model_id, limit=20)
+                conversations_service.update_conversations_cache(model_id, new_conversations)
+                # 异步广播更新
+                import asyncio
+                asyncio.create_task(conversations_service.broadcast_conversations_update(model_id))
+        except Exception as e:
+            print(f"[WARN] Failed to notify WebSocket service of conversation update: {e}")
     
     def get_conversations(self, model_id: int, limit: int = 20) -> List[Dict]:
         """Get conversation history"""

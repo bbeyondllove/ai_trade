@@ -3,7 +3,7 @@
     "http_host": "0.0.0.0",
     "http_port": 5000,
     "websocket_host": "0.0.0.0",
-    "websocket_port": 8766,
+    "websocket_port": 8765,
     "enable_debug": false,
     "enable_reloader": false
   },
@@ -24,14 +24,12 @@
   "risk": {
     "max_daily_loss": 0.05,
     "max_position_size": 0.8,
-    "max_leverage": 10,
+    "max_leverage": 5,
     "min_trade_size_usd": 10,
     "consecutive_loss_limit": 3,
-    "max_risk_per_trade": 0.02,
-    "emergency_stop_loss": 0.15,
-    "allowed_leverages": [3, 5, 10],
+    "allowed_leverages": [2, 3, 5],
     "max_position_coins": 3,
-    "max_total_position_ratio": 0.70,
+    "max_total_position_ratio": 0.85,
     "monitored_coins": [ "BTC","ETH", "SOL", "BNB", "DOGE", "XRP"],
     "take_profit_threshold": 0.15,
     "stop_loss_threshold": 0.10
@@ -58,30 +56,50 @@
   "cache": {
     "price_cache_ttl": 1,
     "indicators_cache_ttl": 600,
-    "max_cache_size": 1000,
-    "enable_persistence": false,
-    "max_kline_length": 1000,
-    "min_kline_length": 100
+    "max_cache_size": 1000
+  },
+  "multi_timeframe": {
+    "timeframes": ["5m", "15m", "1H", "4H"],
+    "timeframe_weights": {
+      "4H": 40,
+      "1H": 35,
+      "15m": 20,
+      "5m": 5
+    },
+    "timeframe_roles": {
+      "4H": "大趋势判断",
+      "1H": "主趋势判断",
+      "15m": "入场时机",
+      "5m": "精确入场"
+    },
+    "min_candles_required": 30,
+    "max_candles_per_symbol": 500
   },
   "logging": {
     "level": "INFO",
     "enable_file_logging": true,
     "max_log_file_size_mb": 50,
     "backup_log_count": 5,
-    "enable_performance_logging": true
+    "enable_performance_logging": true,
+    "third_party_log_levels": {
+      "httpx": "WARNING",
+      "httpcore": "WARNING",
+      "websockets": "WARNING",
+      "urllib3": "WARNING",
+      "werkzeug": "WARNING"
+    }
   },
   "prompts": {
-    "system_role": "你是一个专业的加密货币交易员。只输出JSON格式。",
-    "decision_system_title": "专业量化交易决策系统",
+    "system_role": "你是专业的加密货币技术分析师。专注于技术分析，输出信号和置信度。",
+    "decision_system_title": "技术分析系统",
     "trading_principles": [
-      "趋势为王：只在明显趋势中交易",
-      "双向交易：做多做空机会平等对待，不要只偏向做多",
-      "概率致胜：只参与高胜率交易机会"
+      "基于技术指标识别趋势方向",
+      "客观分析上涨和下跌机会",
+      "只输出高置信度的技术信号"
     ],
     "important_reminders": [
-      "宁可错过，不要做错",
-      "做多做空都是机会：下跌趋势时使用sell_to_enter做空",
-      "避免过度交易"
+      "输出格式：{\"币种\": [\"信号\", 置信度, \"依据\"]}",
+      "buy信号表示看涨，sell信号表示看跌"
     ],
     "short_strategy_signals": [
       "价格跌破关键支撑位",
@@ -90,12 +108,18 @@
       "多时间框架空头排列(SMA7<SMA14<SMA30)",
       "下跌时成交量放大"
     ],
-    "short_strategy_reminder": "不要因为害怕做空而只做多！熊市中做空是主要盈利方式！",
-    "high_volatility_leverage_limit": 5,
-    "high_volatility_leverage_suggestion": 3,
-    "min_risk_reward_ratio": 1.5,
     "output_requirements": [
-      "只输出JSON格式，不包含任何其他文字"
-    ]
+      "只输出JSON格式",
+      "格式：{\"BTC\": [\"buy/sell/hold\", 0.85, \"技术分析依据\"]}"
+    ],
+    "min_confidence_threshold": 0.60,
+    "high_confidence_threshold": 0.75,
+    "extreme_confidence_threshold": 0.85,
+    "leverage_mapping": {
+      "extreme": 5,
+      "high": 3,
+      "medium": 2,
+      "low": 1
+    }
   }
 }

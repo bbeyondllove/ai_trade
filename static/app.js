@@ -162,46 +162,66 @@ class TradingApp {
         container.innerHTML = html;
     }
 
-    async showAggregatedView() {
-        // 如果已经在聚合视图，不做任何操作
-        if (this.isAggregatedView && !this.currentModelId) {
-            return;
-        }
-        
+    showAggregatedView() {
+        console.log('[App] Showing aggregated view');
         this.isAggregatedView = true;
         this.currentModelId = null;
         
-        // 先快速更新UI状态
+        // 更新模型列表的活动状态
         this.updateModelListActiveState();
-        this.hideTabsInAggregatedView();
         
-        // 显示加载状态
+        // 显示聚合视图的加载状态
         this.showLoadingStateForAggregated();
         
-        // 异步加载数据
-        await this.loadAggregatedData();
-    }
-
-    async selectModel(modelId) {
-        // 如果切换到同一个模型，不做任何操作
-        if (this.currentModelId === modelId && !this.isAggregatedView) {
-            return;
+        // 显示聚合视图的图表
+        this.showAggregatedChart();
+        
+        // 隐藏单模型视图的标签页
+        this.hideTabsInAggregatedView();
+        
+        // 重新连接WebSocket流（不带模型过滤器，接收聚合数据）
+        if (typeof this.connectPortfolioStream === 'function') {
+            console.log('[App] Reconnecting portfolio stream for aggregated view');
+            this.connectPortfolioStream();
         }
         
+        // 加载聚合数据
+        this.loadAggregatedData();
+        
+        // 更新价格监视列表
+        this.updatePriceWatchlist();
+    }
+
+    selectModel(modelId) {
+        console.log(`[App] Selecting model: ${modelId}`);
         this.currentModelId = modelId;
         this.isAggregatedView = false;
         
-        // 先快速更新UI状态，不重新加载模型列表
+        // 更新模型列表的活动状态
         this.updateModelListActiveState();
-        this.showTabsInSingleModelView();
         
-        // 显示加载状态，清空旧数据
+        // 显示加载状态
         this.showLoadingState();
         
-        // 异步加载数据
-        await this.loadModelData();
+        // 隐藏聚合视图的图表
+        this.hideAggregatedChart();
+        
+        // 显示单模型视图的标签页
+        this.showTabsInSingleModelView();
+        
+        // 重新连接WebSocket流（带模型过滤器）
+        if (typeof this.connectPortfolioStream === 'function') {
+            console.log('[App] Reconnecting portfolio stream with model filter');
+            this.connectPortfolioStream();
+        }
+        
+        // 加载模型数据
+        this.loadModelData();
+        
+        // 更新价格监视列表
+        this.updatePriceWatchlist();
     }
-    
+
     showLoadingState() {
         // 显示持仓加载状态
         const positionsBody = document.getElementById('positionsBody');
@@ -218,7 +238,16 @@ class TradingApp {
         // 显示对话记录加载状态
         const conversationsBody = document.getElementById('conversationsBody');
         if (conversationsBody) {
-            conversationsBody.innerHTML = '<div class="empty-state">加载中...</div>';
+            // 检查是否有缓存的对话数据
+            if (this.cachedConversations && this.cachedConversations.length > 0) {
+                // 如果有缓存数据，直接显示
+                this.updateConversations(this.cachedConversations);
+            } else {
+                // 否则显示加载中状态
+                conversationsBody.innerHTML = '<div class="empty-state">加载中...</div>';
+                // 主动请求对话记录数据
+                this.loadConversations();
+            }
         }
     }
     
@@ -260,6 +289,25 @@ class TradingApp {
             this.updateConversations(conversations);
         } catch (error) {
             console.error('Failed to load model data:', error);
+        }
+    }
+
+    async loadConversations() {
+        if (!this.currentModelId) return;
+
+        try {
+            const response = await fetch(`/api/models/${this.currentModelId}/conversations?limit=20`);
+            const conversations = await response.json();
+            this.updateConversations(conversations);
+        } catch (error) {
+            console.error('Failed to load conversations:', error);
+            
+            // 如果加载失败，更新UI状态
+            const conversationsBody = document.getElementById('conversationsBody');
+            if (conversationsBody && conversationsBody.querySelector('.empty-state') && 
+                conversationsBody.querySelector('.empty-state').textContent.includes('加载中')) {
+                conversationsBody.innerHTML = '<div class="empty-state">加载失败</div>';
+            }
         }
     }
 
@@ -735,6 +783,9 @@ class TradingApp {
     updateConversations(conversations) {
         const container = document.getElementById('conversationsBody');
 
+        // 缓存对话数据
+        this.cachedConversations = conversations;
+
         if (conversations.length === 0) {
             container.innerHTML = '<div class="empty-state">暂无对话记录</div>';
             return;
@@ -820,6 +871,61 @@ class TradingApp {
 
         document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
         document.getElementById(`${tabName}Tab`).classList.add('active');
+        
+        // 当切换到交易记录或AI对话标签页时，重新请求数据
+        if (tabName === 'trades' || tabName === 'conversations') {
+            this.refreshTabData(tabName);
+        }
+    }
+
+    // 刷新标签页数据
+    async refreshTabData(tabName) {
+        if (!this.currentModelId) return;
+
+        try {
+            if (tabName === 'trades') {
+                // 显示加载状态
+                const tradesBody = document.getElementById('tradesBody');
+                if (tradesBody) {
+                    tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">加载中...</td></tr>';
+                }
+
+                // 重新请求交易记录数据
+                const response = await fetch(`/api/models/${this.currentModelId}/trades?limit=50`);
+                const tradesData = await response.json();
+                
+                // 更新交易记录
+                this.updateTrades(tradesData);
+            } else if (tabName === 'conversations') {
+                // 显示加载状态
+                const conversationsBody = document.getElementById('conversationsBody');
+                if (conversationsBody) {
+                    conversationsBody.innerHTML = '<div class="empty-state">加载中...</div>';
+                }
+
+                // 重新请求对话记录数据
+                const response = await fetch(`/api/models/${this.currentModelId}/conversations?limit=20`);
+                const conversationsData = await response.json();
+                
+                // 更新对话记录
+                this.updateConversations(conversationsData);
+            }
+        } catch (error) {
+            console.error(`Failed to refresh ${tabName} data:`, error);
+            
+            // 出错时显示错误状态
+            if (tabName === 'trades') {
+                const tradesBody = document.getElementById('tradesBody');
+                if (tradesBody) {
+                    tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">加载失败</td></tr>';
+                }
+            } else if (tabName === 'conversations') {
+                const conversationsBody = document.getElementById('conversationsBody');
+                if (conversationsBody) {
+                    conversationsBody.innerHTML = '<div class="empty-state">加载失败</div>';
+                }
+            }
+        }
     }
 
     // API Provider Methods
@@ -1100,10 +1206,11 @@ class TradingApp {
     }
 
     async refresh() {
+        // 只刷新模型列表和市场价格
+        // 投资组合、交易、对话完全由WebSocket推送，不需要手动刷新
         await Promise.all([
             this.loadModels(),
-            this.loadMarketPrices(),
-            this.isAggregatedView ? this.loadAggregatedData() : this.loadModelData()
+            this.loadMarketPrices()
         ]);
     }
 
@@ -1113,15 +1220,9 @@ class TradingApp {
     }
 
     startFallbackRefresh() {
-        // 备用方案：使用传统 setInterval
+        // 备用方案：仅在WebSocket断开时使用，只轮询市场价格
+        // 投资组合数据完全由WebSocket推送
         this.refreshIntervals.market = setInterval(() => this.loadMarketPrices(), 3000);
-        this.refreshIntervals.portfolio = setInterval(() => {
-            if (this.isAggregatedView) {
-                this.loadAggregatedData();
-            } else if (this.currentModelId) {
-                this.loadModelData();
-            }
-        }, 6000);
     }
 
     // 从 API 响应更新市场价格

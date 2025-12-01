@@ -29,6 +29,7 @@ class WebSocketManager:
         self.host = host
         self.port = port
         self.running = False  # 服务器运行状态
+        self.server = None  # ✅ 添加server属性初始化
         # 使用弱引用集合管理客户端，防止内存泄漏
         self.clients: weakref.WeakSet = weakref.WeakSet()
         # 订阅使用弱引用字典
@@ -100,6 +101,17 @@ class WebSocketManager:
         # 注册客户端 (使用弱引用)
         self.clients.add(websocket)
         
+        # 发送欢迎消息
+        try:
+            await self._send_to_client(websocket, {
+                'type': 'connection_established',
+                'client_id': client_id,
+                'timestamp': int(datetime.now().timestamp() * 1000)
+            })
+            logger.debug(f"[WebSocket] Sent welcome message to {client_id}")
+        except Exception as e:
+            logger.error(f"[WebSocket] Failed to send welcome message: {e}")
+        
         try:
             async for message in websocket:
                 try:
@@ -126,25 +138,121 @@ class WebSocketManager:
         try:
             data = json.loads(message)
             msg_type = data.get('type')
+            logger.debug(f"[WebSocket] Received message type: {msg_type}")
             
             if msg_type == 'subscribe':
                 channel = data.get('channel')
+                model_filter = data.get('model_filter')
                 if channel in [c.value for c in WebSocketChannel]:
                     self.subscriptions[channel].add(websocket)
                     logger.debug(f"[WebSocket] Client subscribed to {channel}")
+                    
+                    # 发送初始数据
+                    await self._send_initial_data(websocket, channel, model_filter)
+                    
+                    # 发送订阅确认
                     await self._send_to_client(websocket, {
-                        'type': 'subscribed',
+                        'type': 'subscription_confirmed',
                         'channel': channel,
                         'timestamp': int(datetime.now().timestamp() * 1000)
                     })
                 else:
-                    logger.warning(f"[WebSocket] Invalid channel: {channel}")
+                    logger.debug(f"[WebSocket] Invalid channel: {channel}")
+                    await self._send_to_client(websocket, {
+                        'type': 'error',
+                        'message': f'Invalid channel: {channel}',
+                        'timestamp': int(datetime.now().timestamp() * 1000)
+                    })
                     
             elif msg_type == 'unsubscribe':
                 channel = data.get('channel')
                 if channel in self.subscriptions:
                     self.subscriptions[channel].discard(websocket)
                     logger.debug(f"[WebSocket] Client unsubscribed from {channel}")
+                    
+            elif msg_type == 'get_portfolio':
+                # ✅ 处理主动请求持仓数据
+                model_id = data.get('model_id')
+                logger.info(f"[WebSocket] Client requesting portfolio for model_id={model_id}")
+                
+                try:
+                    # 获取实时价格
+                    from websocket_services import ws_service_manager
+                    market_service = ws_service_manager.get_service('market_prices')
+                    
+                    if market_service and market_service.okx_ws_feed:
+                        all_prices_data = market_service.okx_ws_feed.get_all_prices()
+                        coins = self.config_manager.risk.monitored_coins
+                        current_prices = {coin: all_prices_data[coin]['price'] for coin in all_prices_data if coin in coins}
+                    else:
+                        # fallback
+                        coins = self.config_manager.risk.monitored_coins
+                        prices_data = self.market_fetcher.get_current_prices_batch(coins)
+                        current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
+                    
+                    # 获取持仓数据
+                    if model_id:
+                        portfolio = self.db.get_portfolio(model_id, current_prices)
+                        if portfolio and 'error' not in portfolio:
+                            response = {
+                                'type': 'portfolio_update',
+                                'data': {
+                                    'portfolio': portfolio,
+                                    'model_id': model_id
+                                },
+                                'timestamp': int(datetime.now().timestamp() * 1000),
+                                'source': 'on_demand_request'
+                            }
+                            await self._send_to_client(websocket, response)
+                            logger.info(f"[WebSocket] Sent portfolio for model {model_id}")
+                        else:
+                            error_msg = portfolio.get('error', 'Unknown error') if portfolio else 'Portfolio not found'
+                            await self._send_to_client(websocket, {
+                                'type': 'error',
+                                'message': f'Failed to get portfolio: {error_msg}',
+                                'timestamp': int(datetime.now().timestamp() * 1000)
+                            })
+                    else:
+                        # 聚合视图
+                        models = self.db.get_all_models()
+                        total_portfolio = {
+                            'total_value': 0,
+                            'cash': 0,
+                            'positions_value': 0,
+                            'realized_pnl': 0,
+                            'unrealized_pnl': 0,
+                            'initial_capital': 0,
+                            'positions': []
+                        }
+                        
+                        for model in models:
+                            portfolio = self.db.get_portfolio(model['id'], current_prices)
+                            if portfolio and 'error' not in portfolio:
+                                total_portfolio['total_value'] += portfolio.get('total_value', 0)
+                                total_portfolio['cash'] += portfolio.get('cash', 0)
+                                total_portfolio['positions_value'] += portfolio.get('positions_value', 0)
+                                total_portfolio['realized_pnl'] += portfolio.get('realized_pnl', 0)
+                                total_portfolio['unrealized_pnl'] += portfolio.get('unrealized_pnl', 0)
+                                total_portfolio['initial_capital'] += portfolio.get('initial_capital', 0)
+                        
+                        response = {
+                            'type': 'portfolio_update',
+                            'data': {
+                                'portfolio': total_portfolio
+                            },
+                            'timestamp': int(datetime.now().timestamp() * 1000),
+                            'source': 'on_demand_request'
+                        }
+                        await self._send_to_client(websocket, response)
+                        logger.info("[WebSocket] Sent aggregated portfolio")
+                        
+                except Exception as e:
+                    logger.error(f"[WebSocket] Error handling get_portfolio: {e}", exc_info=True)
+                    await self._send_to_client(websocket, {
+                        'type': 'error',
+                        'message': f'Error fetching portfolio: {str(e)}',
+                        'timestamp': int(datetime.now().timestamp() * 1000)
+                    })
                     
             elif msg_type == 'ping':
                 await self._send_to_client(websocket, {
@@ -156,6 +264,81 @@ class WebSocketManager:
             logger.error(f"[WebSocket] Invalid JSON: {message}")
         except Exception as e:
             logger.error(f"[WebSocket] Error handling message: {e}", exc_info=True)
+            
+    async def _send_initial_data(self, websocket: websockets.WebSocketServerProtocol, channel: str, model_filter: Optional[int] = None):
+        """发送初始数据给新订阅的客户端"""
+        try:
+            # 只有在订阅portfolio频道时发送初始数据
+            if channel == WebSocketChannel.PORTFOLIO.value:
+                from websocket_services import ws_service_manager
+                
+                # 发送交易记录初始数据
+                trades_service = ws_service_manager.get_service('trades')
+                if trades_service and hasattr(trades_service, 'trades_cache'):
+                    if model_filter is not None:
+                        # 发送特定模型的交易记录
+                        trades = trades_service.get_cached_trades(model_filter)
+                        trades_message = {
+                            'type': 'trades_update',
+                            'data': {
+                                'trades': trades,
+                                'model_id': model_filter
+                            },
+                            'timestamp': int(datetime.now().timestamp() * 1000),
+                            'source': 'initial_data'
+                        }
+                        await self._send_to_client(websocket, trades_message)
+                        logger.debug(f"[WebSocket] Sent initial trades data for model {model_filter}")
+                    else:
+                        # 发送所有模型的交易记录
+                        for model_id in trades_service.trades_cache:
+                            trades = trades_service.get_cached_trades(model_id)
+                            trades_message = {
+                                'type': 'trades_update',
+                                'data': {
+                                    'trades': trades,
+                                    'model_id': model_id
+                                },
+                                'timestamp': int(datetime.now().timestamp() * 1000),
+                                'source': 'initial_data'
+                            }
+                            await self._send_to_client(websocket, trades_message)
+                            logger.debug(f"[WebSocket] Sent initial trades data for model {model_id}")
+                
+                # 发送对话记录初始数据
+                conversations_service = ws_service_manager.get_service('conversations')
+                if conversations_service and hasattr(conversations_service, 'conversations_cache'):
+                    if model_filter is not None:
+                        # 发送特定模型的对话记录
+                        conversations = conversations_service.get_cached_conversations(model_filter)
+                        conversations_message = {
+                            'type': 'conversations_update',
+                            'data': {
+                                'conversations': conversations,
+                                'model_id': model_filter
+                            },
+                            'timestamp': int(datetime.now().timestamp() * 1000),
+                            'source': 'initial_data'
+                        }
+                        await self._send_to_client(websocket, conversations_message)
+                        logger.debug(f"[WebSocket] Sent initial conversations data for model {model_filter}")
+                    else:
+                        # 发送所有模型的对话记录
+                        for model_id in conversations_service.conversations_cache:
+                            conversations = conversations_service.get_cached_conversations(model_id)
+                            conversations_message = {
+                                'type': 'conversations_update',
+                                'data': {
+                                    'conversations': conversations,
+                                    'model_id': model_id
+                                },
+                                'timestamp': int(datetime.now().timestamp() * 1000),
+                                'source': 'initial_data'
+                            }
+                            await self._send_to_client(websocket, conversations_message)
+                            logger.debug(f"[WebSocket] Sent initial conversations data for model {model_id}")
+        except Exception as e:
+            logger.error(f"[WebSocket] Error sending initial data: {e}", exc_info=True)
             
     async def broadcast_to_channel(self, channel: WebSocketChannel, message: Dict[str, Any], model_filter: Optional[int] = None):
         """向特定频道广播消息"""
@@ -237,15 +420,23 @@ class WebSocketManager:
         # 关闭服务器
         if self.server:
             try:
+                # 确保在正确的事件循环中执行
                 self.server.close()
-                await self.server.wait_closed()
+                # 使用 asyncio.shield 防止任务被取消
+                await asyncio.shield(self.server.wait_closed())
                 self.server = None
                 logger.info("WebSocket server closed successfully")
+            except asyncio.CancelledError:
+                logger.warning("WebSocket server closing was cancelled")
+                # 即使被取消，也要尝试清理资源
+                if self.server:
+                    self.server.close()
+                    self.server = None
             except Exception as e:
                 logger.warning(f"Error closing WebSocket server: {e}")
         
         # 等待当前循环结束
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)  # 减少等待时间
             
     def get_stats(self) -> Dict[str, Any]:
         """获取服务器统计信息"""

@@ -5,7 +5,7 @@
 
 import json
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
@@ -39,26 +39,25 @@ class LimitsConfig:
 
 @dataclass
 class RiskConfig:
-    """风险管理配置"""
-    max_daily_loss: float = 0.05
-    max_position_size: float = 0.5
-    max_leverage: int = 10
+    """风险管理配置 - 所有参数必须从配置文件读取"""
+    # 必填项：不设置默认值，强制从配置文件读取
+    max_daily_loss: float
+    max_position_size: float
+    max_leverage: int
+    min_trade_size_usd: float
+    consecutive_loss_limit: int
+    allowed_leverages: list
+    max_position_coins: int
+    max_total_position_ratio: float
+    monitored_coins: list
+    take_profit_threshold: float
+    stop_loss_threshold: float
+    # 可选项（有合理默认值）
     max_drawdown: float = 0.15
     max_portfolio_risk: float = 0.5
-    min_trade_size_usd: float = 10
     max_positions: int = 5
-    consecutive_loss_limit: int = 3
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.08
-    # 新增配置项
-    allowed_leverages: list = field(default_factory=lambda: [3, 5, 10])
-    max_position_coins: int = 3
-    max_total_position_ratio: float = 0.70
-    # 添加币种列表配置，不设置默认值，强制从配置文件读取
-    monitored_coins: Optional[list] = None
-    # 止盈止损阈值配置
-    take_profit_threshold: float = 0.30  # 默认30%止盈
-    stop_loss_threshold: float = 0.05    # 默认5%止损
 
 @dataclass
 class TradingConfig:
@@ -91,9 +90,16 @@ class CacheConfig:
     indicators_cache_ttl: int = 300  # 秒
     decisions_cache_ttl: int = 60  # 秒
     max_cache_size: int = 1000
-    # K线数据池限制（防止内存无限增长）
-    max_kline_length: int = 1000  # 每个币种最多保留1000根K线
-    min_kline_length: int = 100   # 最小保留100根K线（量化策略需要）
+
+@dataclass
+class MultiTimeframeConfig:
+    """多周期K线配置 - 所有参数必须从配置文件读取"""
+    # 必填项：不设置默认值，强制从配置文件读取
+    timeframes: List[str]
+    timeframe_weights: Dict[str, int]
+    timeframe_roles: Dict[str, str]
+    min_candles_required: int
+    max_candles_per_symbol: int
 
 @dataclass
 class LoggingConfig:
@@ -105,31 +111,45 @@ class LoggingConfig:
     backup_count: int = 5
     enable_trade_logs: bool = True
     enable_performance_logs: bool = True
+    # 第三方库日志级别控制
+    third_party_log_levels: dict = field(default_factory=lambda: {
+        "httpx": "WARNING",
+        "httpcore": "WARNING",
+        "websockets": "WARNING",
+        "urllib3": "WARNING",
+        "werkzeug": "WARNING"
+    })
 
 
 @dataclass
 class PromptsConfig:
-    """提示词配置"""
+    """提示词配置 - 置信度和杠杆映射必须从配置文件读取"""
+    # 必填项：不设置默认值
+    min_confidence_threshold: float
+    high_confidence_threshold: float
+    extreme_confidence_threshold: float
+    leverage_mapping: dict
+    # 可选项（有默认值）
     system_role: str = "你是一个专业的加密货币交易员。只输出JSON格式。"
-    decision_system_title: str = "专业量化交易决策系统 v2.0"
+    decision_system_title: str = "专业量化交易决策系统"
     trading_principles: list = field(default_factory=lambda: [
         "趋势为王：只在明显趋势中交易",
         "双向交易：做多做空机会平等对待，不要只偏向做多",
-        "风险优先：单笔亏损不超过总资金的2%",
         "概率致胜：只参与高胜率交易机会"
     ])
     important_reminders: list = field(default_factory=lambda: [
         "宁可错过，不要做错",
-        "严格控制单笔风险"
+        "做多做空都是机会：下跌趋势时使用sell做空",
+        "避免过度交易"
     ])
     short_strategy_signals: list = field(default_factory=lambda: [
         "价格跌破关键支撑位",
-        "RSI>70且出现顶背离"
+        "RSI>70且出现顶背离",
+        "MACD在零轴下方死叉",
+        "多时间框架空头排列(SMA7<SMA14<SMA30)",
+        "下跌时成交量放大"
     ])
     short_strategy_reminder: str = "不要因为害怕做空而只做多！熊市中做空是主要盈利方式！"
-    high_volatility_leverage_limit: int = 5
-    high_volatility_leverage_suggestion: int = 3
-    min_risk_reward_ratio: float = 1.5
     output_requirements: list = field(default_factory=lambda: [
         "只输出JSON格式，不包含任何其他文字"
     ])
@@ -141,63 +161,156 @@ class ConfigManager:
         self.config_file = config_file or "trading_config.json"
         self.config_path = Path(self.config_file)
 
-        # 默认配置
-        self.server = ServerConfig()
-        self.timing = TimingConfig()
-        self.limits = LimitsConfig()
-        self.risk = RiskConfig()
-        self.trading = TradingConfig()
-        self.performance = PerformanceConfig()
-        self.cache = CacheConfig()
-        self.logging = LoggingConfig()
-        self.prompts = PromptsConfig()
+        # 不再创建默认配置，强制从文件读取
+        self.server = None
+        self.timing = None
+        self.limits = None
+        self.risk = None
+        self.trading = None
+        self.performance = None
+        self.cache = None
+        self.logging = None
+        self.prompts = None
 
-        # 加载配置
+        # 加载配置（如果失败会抛出异常）
         self.load_config()
 
     def load_config(self):
-        """从文件加载配置"""
-        if self.config_path.exists():
+        """从文件加载配置 - 强制要求配置文件存在且包含所有必需字段"""
+        if not self.config_path.exists():
+            raise FileNotFoundError(
+                f"配置文件不存在: {self.config_path}\n"
+                f"请确保 {self.config_file} 文件存在并包含所有必需的配置项。"
+            )
+
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+
+            # 验证必需的配置节是否存在
+            required_sections = ['risk', 'prompts', 'multi_timeframe']
+            missing_sections = [s for s in required_sections if s not in config_data]
+            if missing_sections:
+                raise ValueError(
+                    f"配置文件缺少必需的配置节: {', '.join(missing_sections)}\n"
+                    f"请检查 {self.config_file} 是否包含: {', '.join(required_sections)}"
+                )
+
+            # 验证risk配置的必需字段
+            risk_required_fields = [
+                'max_daily_loss', 'max_position_size', 'max_leverage',
+                'min_trade_size_usd', 'consecutive_loss_limit',
+                'allowed_leverages', 'max_position_coins', 'max_total_position_ratio',
+                'monitored_coins', 'take_profit_threshold', 'stop_loss_threshold'
+            ]
+            risk_missing = [f for f in risk_required_fields if f not in config_data.get('risk', {})]
+            if risk_missing:
+                raise ValueError(
+                    f"配置文件的 'risk' 节缺少必需字段: {', '.join(risk_missing)}\n"
+                    f"必需字段: {', '.join(risk_required_fields)}"
+                )
+
+            # 验证prompts配置的必需字段
+            prompts_required_fields = [
+                'min_confidence_threshold', 'high_confidence_threshold',
+                'extreme_confidence_threshold', 'leverage_mapping'
+            ]
+            prompts_missing = [f for f in prompts_required_fields if f not in config_data.get('prompts', {})]
+            if prompts_missing:
+                raise ValueError(
+                    f"配置文件的 'prompts' 节缺少必需字段: {', '.join(prompts_missing)}\n"
+                    f"必需字段: {', '.join(prompts_required_fields)}"
+                )
+
+            # 验证multi_timeframe配置的必需字段
+            multi_timeframe_required_fields = [
+                'timeframes', 'timeframe_weights', 'timeframe_roles',
+                'min_candles_required', 'max_candles_per_symbol'
+            ]
+            multi_timeframe_missing = [f for f in multi_timeframe_required_fields if f not in config_data.get('multi_timeframe', {})]
+            if multi_timeframe_missing:
+                raise ValueError(
+                    f"配置文件的 'multi_timeframe' 节缺少必需字段: {', '.join(multi_timeframe_missing)}\n"
+                    f"必需字段: {', '.join(multi_timeframe_required_fields)}"
+                )
+
+            # 创建配置对象（使用配置文件的值）
+            self.server = ServerConfig()
+            self.timing = TimingConfig()
+            self.limits = LimitsConfig()
+            self.trading = TradingConfig()
+            self.performance = PerformanceConfig()
+            self.cache = CacheConfig()
+            self.logging = LoggingConfig()
+            
+            # 创建RiskConfig（所有字段必须从配置文件提供）
             try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
+                self.risk = RiskConfig(**config_data['risk'])
+            except TypeError as e:
+                raise ValueError(
+                    f"创建RiskConfig失败: {e}\n"
+                    f"请检查配置文件中的 'risk' 节是否包含所有必需字段"
+                )
+            
+            # 创建PromptsConfig（必需字段必须从配置文件提供）
+            try:
+                self.prompts = PromptsConfig(**config_data['prompts'])
+            except TypeError as e:
+                raise ValueError(
+                    f"创建PromptsConfig失败: {e}\n"
+                    f"请检查配置文件中的 'prompts' 节是否包含所有必需字段"
+                )
+            
+            # 创建MultiTimeframeConfig（所有字段必须从配置文件提供）
+            try:
+                self.multi_timeframe = MultiTimeframeConfig(**config_data['multi_timeframe'])
+            except TypeError as e:
+                raise ValueError(
+                    f"创建MultiTimeframeConfig失败: {e}\n"
+                    f"请检查配置文件中的 'multi_timeframe' 节是否包含所有必需字段"
+                )
 
-                # 更新配置
-                if 'server' in config_data:
-                    self._update_dataclass(self.server, config_data['server'])
+            # 更新其他可选配置节
+            if 'server' in config_data:
+                self._update_dataclass(self.server, config_data['server'])
 
-                if 'timing' in config_data:
-                    self._update_dataclass(self.timing, config_data['timing'])
+            if 'timing' in config_data:
+                self._update_dataclass(self.timing, config_data['timing'])
 
-                if 'limits' in config_data:
-                    self._update_dataclass(self.limits, config_data['limits'])
+            if 'limits' in config_data:
+                self._update_dataclass(self.limits, config_data['limits'])
 
-                if 'risk' in config_data:
-                    self._update_dataclass(self.risk, config_data['risk'])
+            if 'trading' in config_data:
+                self._update_dataclass(self.trading, config_data['trading'])
 
-                if 'trading' in config_data:
-                    self._update_dataclass(self.trading, config_data['trading'])
+            if 'performance' in config_data:
+                self._update_dataclass(self.performance, config_data['performance'])
 
-                if 'performance' in config_data:
-                    self._update_dataclass(self.performance, config_data['performance'])
+            if 'cache' in config_data:
+                self._update_dataclass(self.cache, config_data['cache'])
 
-                if 'cache' in config_data:
-                    self._update_dataclass(self.cache, config_data['cache'])
+            if 'logging' in config_data:
+                self._update_dataclass(self.logging, config_data['logging'])
 
-                if 'logging' in config_data:
-                    self._update_dataclass(self.logging, config_data['logging'])
+            print(f"✅ 配置加载成功: {self.config_file}")
+            print(f"   - 监控币种: {self.risk.monitored_coins}")
+            print(f"   - 最大杠杆: {self.risk.max_leverage}x")
+            print(f"   - 允许杠杆: {self.risk.allowed_leverages}")
+            print(f"   - 置信度阈值: min={self.prompts.min_confidence_threshold}, high={self.prompts.high_confidence_threshold}, extreme={self.prompts.extreme_confidence_threshold}")
+            print(f"   - 杠杆映射: {self.prompts.leverage_mapping}")
+            print(f"   - 多周期配置: {self.multi_timeframe.timeframes}")
 
-
-                if 'prompts' in config_data:
-                    self._update_dataclass(self.prompts, config_data['prompts'])
-
-                print(f"Configuration loaded from {self.config_file}")
-
-            except Exception as e:
-                print(f"Failed to load config file: {e}. Using defaults.")
-        else:
-            print(f"Config file not found. Using defaults.")
-            self.save_config()  # 保存默认配置
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"配置文件JSON格式错误: {e}\n"
+                f"请检查 {self.config_file} 的JSON语法是否正确"
+            )
+        except Exception as e:
+            # 重新抛出异常，不使用默认值
+            raise RuntimeError(
+                f"加载配置文件失败: {e}\n"
+                f"系统无法启动，请修复配置文件后重试。"
+            )
 
     def save_config(self):
         """保存配置到文件"""

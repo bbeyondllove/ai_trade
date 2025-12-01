@@ -44,27 +44,20 @@
                 console.log('[WebSocket] ✅ Connection restored! Starting recovery process...');
                 self.resubscribeWebSocketChannels();
                 
-                // ⚠️ 重连后主动刷新所有数据
+                // ⚠️ 重连后只刷新实时数据（市场价格和投资组合）
+                // 交易记录和AI对话完全由WebSocket推送，不需要手动刷新
                 console.log('[WebSocket] 🔄 Scheduling data refresh in 1 second...');
                 setTimeout(() => {
                     console.log('[WebSocket] 🔄 Starting data refresh NOW...');
                     console.log('[WebSocket]   - Current view:', self.isAggregatedView ? 'Aggregated' : 'Single Model');
                     console.log('[WebSocket]   - Current model ID:', self.currentModelId);
                     
-                    // 刷新市场价格
+                    // 只刷新市场价格（因为涉及实时OKX数据）
                     console.log('[WebSocket] 💹 Refreshing market prices...');
                     self.loadMarketPrices();
                     
-                    // 刷新投资组合
-                    if (self.isAggregatedView) {
-                        console.log('[WebSocket] 📈 Refreshing aggregated portfolio data...');
-                        self.loadAggregatedData();
-                    } else if (self.currentModelId) {
-                        console.log('[WebSocket] 📈 Refreshing model', self.currentModelId, 'portfolio data...');
-                        self.loadModelData();
-                    } else {
-                        console.warn('[WebSocket] ⚠️  No model selected, skipping portfolio refresh');
-                    }
+                    // 不刷新投资组合、交易、对话 - 这些数据完全由WebSocket推送
+                    console.log('[WebSocket] ✅ Waiting for WebSocket data stream to resume...');
                     
                     console.log('[WebSocket] ✅ Data refresh completed!');
                 }, 1000); // 增加到1秒，确保订阅完成
@@ -109,11 +102,6 @@
                         if (portfolioData.positions) {
                             self.updatePositions(portfolioData.positions, true);
                         }
-                        
-                        // 更新账户价值走势图
-                        if (portfolioData.total_value !== undefined) {
-                            self._updateChartWithRealtimeData(portfolioData.total_value);
-                        }
                     } else {
                         console.log('[WebSocket] Ignoring aggregated data - not in aggregated view');
                     }
@@ -137,16 +125,120 @@
                     if (portfolioData.positions) {
                         self.updatePositions(portfolioData.positions, false);
                     }
-                    
-                    // 更新账户价值走势图
-                    if (portfolioData.total_value !== undefined) {
-                        self._updateChartWithRealtimeData(portfolioData.total_value);
+                }
+                
+                // 如果是初始数据且UI仍显示加载中，则清除加载状态
+                const positionsBody = document.getElementById('positionsBody');
+                if (positionsBody && positionsBody.querySelector('.empty-state') && 
+                    positionsBody.querySelector('.empty-state').textContent.includes('加载中')) {
+                    if (portfolioData.positions && portfolioData.positions.length > 0) {
+                        if (self.isAggregatedView) {
+                            self.updatePositions(portfolioData.positions, true);
+                        } else {
+                            self.updatePositions(portfolioData.positions, false);
+                        }
+                    } else {
+                        if (self.isAggregatedView) {
+                            positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">聚合视图暂无持仓</td></tr>';
+                        } else {
+                            positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无持仓</td></tr>';
+                        }
                     }
                 }
                 
                 console.log('[WebSocket] Portfolio updated - View:', self.isAggregatedView ? 'Aggregated' : 'Single Model');
             } else {
                 console.warn('[WebSocket] Invalid portfolio_update format:', message);
+            }
+        });
+
+        // Trades update handler
+        this.wsClient.on('trades_update', (message) => {
+            console.log('[WebSocket] Received trades_update:', message);
+            if (message.data && message.data.trades) {
+                const tradesData = message.data.trades;
+                const receivedModelId = message.data.model_id;
+                
+                console.log('[WebSocket] Processing trades data:', tradesData.length, 'trades');
+                console.log('[WebSocket] Received model_id:', receivedModelId, 'Current model_id:', self.currentModelId);
+                
+                // 更新交易记录，无论是否为当前模型（确保UI不会一直显示加载中）
+                if (!self.isAggregatedView) {
+                    // 单模型视图：只更新当前模型的数据
+                    if (receivedModelId === self.currentModelId) {
+                        console.log('[WebSocket] Updating trades for model', receivedModelId);
+                        self.updateTrades(tradesData);
+                    }
+                } else {
+                    // 聚合视图：更新所有模型的数据（如果有需要的话）
+                    // 目前聚合视图不显示交易记录，所以可以忽略
+                    console.log('[WebSocket] Aggregated view - trades update received');
+                }
+                
+                // 如果是初始数据且UI仍显示加载中，则清除加载状态
+                const tradesBody = document.getElementById('tradesBody');
+                if (tradesBody && tradesBody.querySelector('.empty-state') && 
+                    tradesBody.querySelector('.empty-state').textContent.includes('加载中')) {
+                    if (tradesData.length > 0) {
+                        self.updateTrades(tradesData);
+                    } else {
+                        tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易记录</td></tr>';
+                    }
+                }
+            } else {
+                console.warn('[WebSocket] Invalid trades_update format:', message);
+                
+                // 如果数据格式无效且UI仍显示加载中，则清除加载状态
+                const tradesBody = document.getElementById('tradesBody');
+                if (tradesBody && tradesBody.querySelector('.empty-state') && 
+                    tradesBody.querySelector('.empty-state').textContent.includes('加载中')) {
+                    tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易记录</td></tr>';
+                }
+            }
+        });
+
+        // Conversations update handler
+        this.wsClient.on('conversations_update', (message) => {
+            console.log('[WebSocket] Received conversations_update:', message);
+            if (message.data && message.data.conversations) {
+                const conversationsData = message.data.conversations;
+                const receivedModelId = message.data.model_id;
+                
+                console.log('[WebSocket] Processing conversations data:', conversationsData.length, 'conversations');
+                console.log('[WebSocket] Received model_id:', receivedModelId, 'Current model_id:', self.currentModelId);
+                
+                // 更新对话记录，无论是否为当前模型（确保UI不会一直显示加载中）
+                if (!self.isAggregatedView) {
+                    // 单模型视图：只更新当前模型的数据
+                    if (receivedModelId === self.currentModelId) {
+                        console.log('[WebSocket] Updating conversations for model', receivedModelId);
+                        self.updateConversations(conversationsData);
+                    }
+                } else {
+                    // 聚合视图：更新所有模型的数据（如果有需要的话）
+                    // 目前聚合视图不显示对话记录，所以可以忽略
+                    console.log('[WebSocket] Aggregated view - conversations update received');
+                }
+                
+                // 如果是初始数据且UI仍显示加载中，则清除加载状态
+                const conversationsBody = document.getElementById('conversationsBody');
+                if (conversationsBody && conversationsBody.querySelector('.empty-state') && 
+                    conversationsBody.querySelector('.empty-state').textContent.includes('加载中')) {
+                    if (conversationsData.length > 0) {
+                        self.updateConversations(conversationsData);
+                    } else {
+                        conversationsBody.innerHTML = '<div class="empty-state">暂无对话记录</div>';
+                    }
+                }
+            } else {
+                console.warn('[WebSocket] Invalid conversations_update format:', message);
+                
+                // 如果数据格式无效且UI仍显示加载中，则清除加载状态
+                const conversationsBody = document.getElementById('conversationsBody');
+                if (conversationsBody && conversationsBody.querySelector('.empty-state') && 
+                    conversationsBody.querySelector('.empty-state').textContent.includes('加载中')) {
+                    conversationsBody.innerHTML = '<div class="empty-state">暂无对话记录</div>';
+                }
             }
         });
 
@@ -162,18 +254,25 @@
             self.updateSystemHealth(data);
         });
 
-        // Error handler
+        // Error handler - 只在非首次连接时显示错误通知
         this.wsClient.onError = (error) => {
             console.error('[WebSocket] Error:', error);
             const errorMsg = error.message || 'WebSocket 连接错误';
             const url = error.url || 'unknown';
-            self.showNotification(`${errorMsg}`, 'error');
+            
+            // 详细日志输出到控制台
             console.error('[WebSocket] 详细信息:', {
                 '错误消息': errorMsg,
                 '连接地址': url,
                 '当前时间': new Date().toISOString(),
+                '重连次数': self.wsClient.reconnectAttempts,
                 '浏览器': navigator.userAgent
             });
+            
+            // 只在重连失败时显示通知（避免首次连接失败弹出）
+            if (self.wsClient.reconnectAttempts > 2) {
+                self.showNotification(`WebSocket 连接错误，正在重连... (第${self.wsClient.reconnectAttempts}次)`, 'warning');
+            }
         };
     };
 
@@ -204,6 +303,9 @@
         // If we have a current model, also subscribe with model filter
         if (this.currentModelId) {
             this.wsClient.subscribe('portfolio', this.currentModelId);
+        } else {
+            // 订阅聚合视图数据
+            this.wsClient.subscribe('portfolio', null);
         }
 
         // Also subscribe to trade notifications for real-time updates
@@ -219,7 +321,6 @@
         if (this.wsClient && this.wsClient.isConnected) {
             this.wsClient.unsubscribe('market_prices');
             this.wsClient.unsubscribe('portfolio');
-            this.wsClient.unsubscribe('trade_notifications');
         }
     };
 
@@ -292,113 +393,6 @@
         if (streamingButton) {
             streamingButton.disabled = !connected;
             streamingButton.textContent = connected ? 'Stop Real-time Updates' : 'Start Real-time Updates';
-        }
-    };
-
-    // 使用实时数据更新图表（追加当前点，只刷新图表区域）
-    TradingApp.prototype._updateChartWithRealtimeData = function(currentValue) {
-        if (!this.chart) {
-            console.log('[WebSocket] Chart not initialized yet, skipping update');
-            return;
-        }
-        
-        try {
-            const option = this.chart.getOption();
-            if (!option || !option.series || option.series.length === 0) {
-                console.log('[WebSocket] Chart option not ready, skipping update');
-                return;
-            }
-            
-            // 获取现有数据
-            let xAxisData = Array.isArray(option.xAxis[0].data) ? [...option.xAxis[0].data] : [];
-            let seriesData = Array.isArray(option.series[0].data) ? [...option.series[0].data] : [];
-            
-            // 检查数据是否真正变化（避免无意义的更新）
-            if (seriesData.length > 0) {
-                const lastValue = seriesData[seriesData.length - 1];
-                const diff = Math.abs(currentValue - lastValue);
-                // 如果变化小于0.01美元，跳过更新（避免频繁刷新）
-                if (diff < 0.01) {
-                    console.log('[WebSocket] Chart value unchanged, skipping update');
-                    return;
-                }
-            }
-            
-            // 获取当前时间
-            const now = new Date();
-            const currentTime = now.toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-            
-            console.log(`[WebSocket] Chart update - Time: ${currentTime}, Value: $${currentValue.toFixed(2)}, Current points: ${seriesData.length}`);
-            
-            // 如果最后一个点的时间和当前时间相同（同一分钟内），替换；否则追加
-            if (xAxisData.length > 0 && xAxisData[xAxisData.length - 1] === currentTime) {
-                // 替换最后一个点（同一分钟内的更新）
-                seriesData[seriesData.length - 1] = currentValue;
-                console.log('[WebSocket] Replaced last point (same minute)');
-            } else {
-                // 追加新点（新的一分钟）
-                xAxisData.push(currentTime);
-                seriesData.push(currentValue);
-                console.log('[WebSocket] Added new point (new minute)');
-                
-                // 保持最近100个点（避免数据过多）
-                if (xAxisData.length > 100) {
-                    xAxisData.shift();
-                    seriesData.shift();
-                    console.log('[WebSocket] Removed oldest point (keeping last 100)');
-                }
-            }
-            
-            // 计算Y轴范围（根据数据动态调整）
-            const values = seriesData.filter(v => v !== null && v !== undefined && !isNaN(v));
-            if (values.length === 0) {
-                console.warn('[WebSocket] No valid data points to display');
-                return;
-            }
-            
-            const minValue = Math.min(...values);
-            const maxValue = Math.max(...values);
-            const range = maxValue - minValue;
-            
-            // 智能调整Y轴范围
-            let yMin, yMax;
-            if (range < 1) {
-                const center = (minValue + maxValue) / 2;
-                yMin = center - 0.5;
-                yMax = center + 0.5;
-            } else {
-                const padding = range * 0.1;
-                yMin = minValue - padding;
-                yMax = maxValue + padding;
-            }
-            
-            // ✅ 核心优化：使用 setOption 的局部更新模式，只刷新数据，不重绘整个图表
-            this.chart.setOption({
-                xAxis: {
-                    data: xAxisData
-                },
-                yAxis: {
-                    min: yMin,
-                    max: yMax,
-                    scale: true
-                },
-                series: [{
-                    data: seriesData
-                }]
-            }, {
-                notMerge: false,    // ✅ 合并模式，只更新指定部分
-                lazyUpdate: true,   // ✅ 延迟更新，批量处理，减少重绘
-                silent: true,       // ✅ 静默模式，不触发事件和动画
-                replaceMerge: ['xAxis', 'yAxis', 'series']  // ✅ 只替换这些组件，不影响其他部分
-            });
-            
-            console.log(`[WebSocket] Chart updated - Total points: ${seriesData.length}, Range: $${minValue.toFixed(2)} - $${maxValue.toFixed(2)}`);
-        } catch (error) {
-            console.error('[WebSocket] Error updating chart:', error);
         }
     };
 

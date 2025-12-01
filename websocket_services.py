@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from websocket_server import WebSocketManager, WebSocketChannel, ws_manager
 from okx_price_feed import OKXWebSocketPriceFeed
+from multi_timeframe_candles import get_multi_candle_manager
 
 logger = logging.getLogger(__name__)
 
@@ -162,12 +163,14 @@ class PortfolioStreamer:
                 models = self.ws_manager.db.get_all_models()
                 total_portfolio = {
                     'total_value': 0,
-                    'cash': 0,
+                    'cash': 0,  # 累加所有模型的可用现金
+                    'free_balance': 0,  # 实盘模式下也需要累加可用余额
                     'positions_value': 0,
                     'realized_pnl': 0,
                     'unrealized_pnl': 0,
                     'initial_capital': 0,
-                    'positions': []
+                    'positions': [],
+                    'is_live': False  # 默认为模拟盘
                 }
 
                 all_positions = {}
@@ -181,11 +184,18 @@ class PortfolioStreamer:
                             continue  # 跳过有错误的模型，不累加其数据
                         
                         total_portfolio['total_value'] += portfolio.get('total_value', 0)
-                        total_portfolio['cash'] += portfolio.get('cash', 0)
                         total_portfolio['positions_value'] += portfolio.get('positions_value', 0)
                         total_portfolio['realized_pnl'] += portfolio.get('realized_pnl', 0)
                         total_portfolio['unrealized_pnl'] += portfolio.get('unrealized_pnl', 0)
                         total_portfolio['initial_capital'] += portfolio.get('initial_capital', 0)
+                        
+                        # 累加实盘相关字段
+                        total_portfolio['cash'] += portfolio.get('cash', 0)
+                        total_portfolio['free_balance'] += portfolio.get('free_balance', 0)
+                        
+                        # 如果有任何一个模型是实盘，则聚合视图标记为实盘
+                        if portfolio.get('is_live', False):
+                            total_portfolio['is_live'] = True
 
                         # Aggregate positions
                         for pos in portfolio.get('positions', []):
@@ -220,6 +230,10 @@ class PortfolioStreamer:
                                     logger.debug(f"Skipping PnL calculation for {current_pos['coin']}: current_price={current_price}, avg_price={current_pos['avg_price']}")
 
                 total_portfolio['positions'] = list(all_positions.values())
+                
+                # 计算聚合可用现金：计算方式是先累加总资产和持仓价，最后一起计算
+                # 可用现金 = 计算后的总资产 - 计算后的持仓价
+                total_portfolio['cash'] = total_portfolio['total_value'] - total_portfolio['positions_value']
 
                 logger.debug(f"[WebSocket] Broadcasting portfolio: total_value=${total_portfolio['total_value']:.2f}, "
                            f"unrealized_pnl=${total_portfolio['unrealized_pnl']:.2f}")
@@ -304,95 +318,281 @@ class PortfolioStreamer:
             await asyncio.sleep(0.2)
             self.update_interval = original_interval
 
-class LiveTradingMonitor:
-    """Real-time live trading monitoring service replacing HTTP polling for balance/positions"""
+class TradesStreamer:
+    """Real-time trades streaming service - maintains in-memory cache and broadcasts updates"""
 
-    def __init__(self, ws_manager: WebSocketManager, update_interval: float = 10.0):
+    def __init__(self, ws_manager: WebSocketManager, update_interval: float = 3.0):
         self.ws_manager = ws_manager
         self.update_interval = update_interval
         self.running = False
-        self.balance_task = None
-        self.positions_task = None
+        self.streaming_task = None
+        # 内存缓存：存储每个模型的最新交易记录
+        self.trades_cache = {}  # {model_id: [trades]}
+        
+    def update_trades_cache(self, model_id: int, new_trades: List[Dict]):
+        """更新指定模型的交易缓存"""
+        self.trades_cache[model_id] = new_trades
+        
+    def get_cached_trades(self, model_id: int) -> List[Dict]:
+        """获取指定模型的缓存交易记录"""
+        return self.trades_cache.get(model_id, [])
+        
+    async def broadcast_trades_update(self, model_id: int):
+        """广播指定模型的交易更新"""
+        try:
+            trades = self.get_cached_trades(model_id)
+            
+            trades_message = {
+                'type': 'trades_update',
+                'data': {
+                    'trades': trades,
+                    'model_id': model_id
+                },
+                'timestamp': int(time.time() * 1000),
+                'source': 'memory_cache'
+            }
+            
+            # Broadcast to all clients viewing this model
+            await self.ws_manager.broadcast_to_channel(
+                WebSocketChannel.PORTFOLIO,
+                trades_message,
+                model_filter=model_id
+            )
+            logger.debug(f"[Trades] Broadcasted {len(trades)} cached trades for model {model_id}")
+            
+        except Exception as e:
+            logger.error(f"[Trades] Error broadcasting trades for model {model_id}: {e}")
 
-    async def start_monitoring(self):
-        """Start live trading monitoring"""
+    async def start_streaming(self):
+        """Start real-time trades streaming - initialize cache from database"""
         if self.running:
             return
 
         self.running = True
-        self.balance_task = asyncio.create_task(self._monitor_balance())
-        self.positions_task = asyncio.create_task(self._monitor_positions())
-        logger.info("Live trading monitoring started")
+        self.streaming_task = asyncio.create_task(self._stream_trades_data())
+        
+        # 初始化时从数据库加载所有模型的交易记录到内存
+        try:
+            if self.ws_manager.db:
+                models = self.ws_manager.db.get_all_models()
+                for model in models:
+                    model_id = model['id']
+                    trades = self.ws_manager.db.get_trades(model_id, limit=50)
+                    self.trades_cache[model_id] = trades
+                    logger.debug(f"[Trades] Initialized cache for model {model_id} with {len(trades)} trades")
+                    
+                    # 不再立即广播初始数据，等待客户端订阅后再发送
+        except Exception as e:
+            logger.error(f"[Trades] Error initializing cache: {e}")
+        
+        logger.info("Trades streaming started with memory cache")
+        
+    async def _stream_trades_data(self):
+        """定期推送交易记录数据，确保客户端能及时收到更新"""
+        while self.running:
+            try:
+                # 定期广播所有模型的交易记录
+                for model_id in self.trades_cache:
+                    await self.broadcast_trades_update(model_id)
+                
+                await asyncio.sleep(self.update_interval)
+            except Exception as e:
+                logger.error(f"[Trades] Error in streaming loop: {e}")
+                await asyncio.sleep(5)
+
+    async def stop_streaming(self):
+        """Stop trades streaming"""
+        self.running = False
+        if self.streaming_task:
+            self.streaming_task.cancel()
+            try:
+                await self.streaming_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Trades streaming stopped")
+        
+    # 移除原来的_stream_trades_data方法，不再定时轮询数据库
+
+class ConversationsStreamer:
+    """Real-time conversations streaming service - maintains in-memory cache and broadcasts updates"""
+
+    def __init__(self, ws_manager: WebSocketManager, update_interval: float = 3.0):
+        self.ws_manager = ws_manager
+        self.update_interval = update_interval
+        self.running = False
+        self.streaming_task = None
+        # 内存缓存：存储每个模型的最新对话记录
+        self.conversations_cache = {}  # {model_id: [conversations]}
+        
+    def update_conversations_cache(self, model_id: int, new_conversations: List[Dict]):
+        """更新指定模型的对话缓存"""
+        self.conversations_cache[model_id] = new_conversations
+        
+    def get_cached_conversations(self, model_id: int) -> List[Dict]:
+        """获取指定模型的缓存对话记录"""
+        return self.conversations_cache.get(model_id, [])
+        
+    async def broadcast_conversations_update(self, model_id: int):
+        """广播指定模型的对话更新"""
+        try:
+            conversations = self.get_cached_conversations(model_id)
+            
+            conversations_message = {
+                'type': 'conversations_update',
+                'data': {
+                    'conversations': conversations,
+                    'model_id': model_id
+                },
+                'timestamp': int(time.time() * 1000),
+                'source': 'memory_cache'
+            }
+            
+            # Broadcast to all clients viewing this model
+            await self.ws_manager.broadcast_to_channel(
+                WebSocketChannel.PORTFOLIO,
+                conversations_message,
+                model_filter=model_id
+            )
+            logger.debug(f"[Conversations] Broadcasted {len(conversations)} cached conversations for model {model_id}")
+            
+        except Exception as e:
+            logger.error(f"[Conversations] Error broadcasting conversations for model {model_id}: {e}")
+
+    async def start_streaming(self):
+        """Start real-time conversations streaming - initialize cache from database"""
+        if self.running:
+            return
+
+        self.running = True
+        
+        # 初始化时从数据库加载所有模型的对话记录到内存
+        try:
+            if self.ws_manager.db:
+                models = self.ws_manager.db.get_all_models()
+                for model in models:
+                    model_id = model['id']
+                    conversations = self.ws_manager.db.get_conversations(model_id, limit=20)
+                    self.conversations_cache[model_id] = conversations
+                    logger.debug(f"[Conversations] Initialized cache for model {model_id} with {len(conversations)} conversations")
+                    
+                    # 不再立即广播初始数据，等待客户端订阅后再发送
+        except Exception as e:
+            logger.error(f"[Conversations] Error initializing cache: {e}")
+        
+        logger.info("Conversations streaming started with memory cache")
+
+    async def stop_streaming(self):
+        """Stop conversations streaming"""
+        self.running = False
+        if self.streaming_task:
+            self.streaming_task.cancel()
+            try:
+                await self.streaming_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Conversations streaming stopped")
+        
+    # 移除原来的_stream_conversations_data方法，不再定时轮询数据库
+
+class LiveTradingMonitor:
+    """Real-time live trading monitoring service using OKX Private WebSocket"""
+
+    def __init__(self, ws_manager: WebSocketManager, update_interval: float = 10.0):
+        self.ws_manager = ws_manager
+        self.running = False
+        self.okx_private_feed = None  # OKX Private WebSocket订阅
+        self.okx_private_task = None
+
+    async def start_monitoring(self):
+        """Start live trading monitoring with OKX Private WebSocket"""
+        if self.running:
+            return
+
+        self.running = True
+        
+        # 启动OKX Private WebSocket订阅
+        try:
+            from live_trading_service import live_trading_service
+            from okx_private_feed import OKXPrivateFeed
+            
+            # 检查实盘服务是否已连接
+            if not live_trading_service.is_connected:
+                logger.warning("Live trading service not connected, monitoring not started")
+                return
+            
+            # 创建OKX Private WebSocket订阅
+            self.okx_private_feed = OKXPrivateFeed(
+                api_key=live_trading_service.api_key,
+                secret_key=live_trading_service.secret_key,
+                passphrase=live_trading_service.passphrase
+            )
+            
+            # 设置回调函数
+            self.okx_private_feed.set_balance_callback(self._on_balance_update)
+            self.okx_private_feed.set_positions_callback(self._on_positions_update)
+            
+            # 启动WebSocket订阅
+            self.okx_private_task = asyncio.create_task(self.okx_private_feed.start())
+            logger.info("Live trading monitoring started with OKX Private WebSocket")
+            
+        except Exception as e:
+            logger.error(f"Failed to start OKX Private WebSocket: {e}")
 
     async def stop_monitoring(self):
         """Stop live trading monitoring"""
         self.running = False
 
-        if self.balance_task:
-            self.balance_task.cancel()
+        # 停止OKX Private WebSocket
+        if self.okx_private_feed:
+            await self.okx_private_feed.stop()
+        if self.okx_private_task:
+            self.okx_private_task.cancel()
             try:
-                await self.balance_task
-            except asyncio.CancelledError:
-                pass
-
-        if self.positions_task:
-            self.positions_task.cancel()
-            try:
-                await self.positions_task
+                await self.okx_private_task
             except asyncio.CancelledError:
                 pass
 
         logger.info("Live trading monitoring stopped")
 
-    async def _monitor_balance(self):
-        """Monitor live trading balance"""
-        while self.running:
-            try:
-                from live_trading_service import live_trading_service
-
-                balance_result = live_trading_service.get_balance()
-
-                balance_message = {
-                    'type': 'live_balance_update',
-                    'data': balance_result,
-                    'timestamp': int(time.time() * 1000),
-                    'source': 'websocket_stream'
-                }
-
-                await self.ws_manager.broadcast_to_channel(
-                    WebSocketChannel.LIVE_BALANCE,
-                    balance_message
-                )
-
-            except Exception as e:
-                logger.error(f"Balance monitoring error: {e}")
-
-            await asyncio.sleep(self.update_interval)
-
-    async def _monitor_positions(self):
-        """Monitor live trading positions"""
-        while self.running:
-            try:
-                from live_trading_service import live_trading_service
-
-                positions_result = live_trading_service.get_positions()
-
-                positions_message = {
-                    'type': 'live_positions_update',
-                    'data': positions_result,
-                    'timestamp': int(time.time() * 1000),
-                    'source': 'websocket_stream'
-                }
-
-                await self.ws_manager.broadcast_to_channel(
-                    WebSocketChannel.LIVE_POSITIONS,
-                    positions_message
-                )
-
-            except Exception as e:
-                logger.error(f"Positions monitoring error: {e}")
-
-            await asyncio.sleep(self.update_interval)
+    def _on_balance_update(self, balance_data: Dict):
+        """OKX Private WebSocket余额更新回调"""
+        try:
+            balance_message = {
+                'type': 'live_balance_update',
+                'data': balance_data,
+                'timestamp': int(time.time() * 1000),
+                'source': 'okx_private_websocket'
+            }
+            
+            # 异步广播
+            asyncio.create_task(self.ws_manager.broadcast_to_channel(
+                WebSocketChannel.LIVE_BALANCE,
+                balance_message
+            ))
+            logger.debug("[OKX Private WS] Broadcasted balance update")
+            
+        except Exception as e:
+            logger.error(f"Error in balance update callback: {e}")
+    
+    def _on_positions_update(self, positions_data: Dict):
+        """OKX Private WebSocket持仓更新回调"""
+        try:
+            positions_message = {
+                'type': 'live_positions_update',
+                'data': positions_data,
+                'timestamp': int(time.time() * 1000),
+                'source': 'okx_private_websocket'
+            }
+            
+            # 异步广播
+            asyncio.create_task(self.ws_manager.broadcast_to_channel(
+                WebSocketChannel.LIVE_POSITIONS,
+                positions_message
+            ))
+            logger.debug("[OKX Private WS] Broadcasted positions update")
+            
+        except Exception as e:
+            logger.error(f"Error in positions update callback: {e}")
 
 class SystemHealthMonitor:
     """Real-time system health monitoring service"""
@@ -499,8 +699,14 @@ class WebSocketServiceManager:
         
         self.services['market_prices'] = MarketPriceStreamer(ws_manager, update_interval=market_interval)
         self.services['portfolio'] = PortfolioStreamer(ws_manager, update_interval=portfolio_interval)
+        self.services['trades'] = TradesStreamer(ws_manager, update_interval=3.0)
+        self.services['conversations'] = ConversationsStreamer(ws_manager, update_interval=3.0)
         self.services['live_trading'] = LiveTradingMonitor(ws_manager, update_interval=10.0)
         self.services['system_health'] = SystemHealthMonitor(ws_manager, update_interval=30.0)
+        
+        # 初始化多周期K线管理器
+        coins = config_manager.risk.monitored_coins
+        self.multi_candle_manager = get_multi_candle_manager(symbols=coins)
 
         self.initialized = True
         logger.info(f"WebSocket services initialized - Market: {market_interval}s, Portfolio: {portfolio_interval}s")
@@ -510,6 +716,17 @@ class WebSocketServiceManager:
         if not self.initialized:
             logger.error("WebSocket services not initialized")
             return
+        
+        # 启动多周期K线管理器
+        if self.multi_candle_manager:
+            logger.info("Starting multi-timeframe candle manager...")
+            await self.multi_candle_manager.start()
+            logger.info("Multi-timeframe candle manager started")
+            is_ready = self.multi_candle_manager.is_ready()
+            logger.info(f"Multi-timeframe candle manager ready status: {is_ready}")
+            if not is_ready:
+                summary = self.multi_candle_manager.get_summary()
+                logger.debug(f"Multi-timeframe candle manager summary: {summary}")
 
         # 并行启动所有服务，避免阻塞
         tasks = []
@@ -530,6 +747,14 @@ class WebSocketServiceManager:
 
     async def stop_all_services(self):
         """Stop all WebSocket streaming services"""
+        # 停止多周期K线管理器
+        if self.multi_candle_manager:
+            try:
+                await self.multi_candle_manager.stop()
+                logger.info("Multi-timeframe candle manager stopped")
+            except Exception as e:
+                logger.error(f"Failed to stop multi-candle manager: {e}")
+        
         for service_name, service in self.services.items():
             try:
                 await service.stop_streaming() if hasattr(service, 'stop_streaming') else await service.stop_monitoring()
@@ -540,6 +765,10 @@ class WebSocketServiceManager:
     def get_service(self, name: str):
         """Get a specific service by name"""
         return self.services.get(name)
+    
+    def get_multi_candle_manager(self):
+        """获取多周期K线管理器"""
+        return self.multi_candle_manager
 
     async def trigger_portfolio_update(self):
         """Trigger immediate portfolio update"""
