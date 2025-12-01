@@ -3,8 +3,11 @@ Database management module
 """
 import sqlite3
 import json
+import logging
 from datetime import datetime
 from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self, db_path: str = 'AITradeGame.db'):
@@ -338,6 +341,7 @@ class Database:
                             pnl = (avg_price - current_price) * quantity
                     
                     unrealized_pnl += pnl
+                    logger.debug(f"[Portfolio] {coin} 持仓PNL计算: side={side}, size={quantity}, entry_price={avg_price}, current_price={current_price}, pnl={pnl}")
                     
                     # 计算持仓价值和保证金
                     position_value = quantity * avg_price
@@ -457,6 +461,7 @@ class Database:
 
                         pos['pnl'] = pos_pnl
                         unrealized_pnl += pos_pnl
+                        logger.debug(f"[Portfolio] {coin} 持仓PNL计算: side={pos['side']}, size={quantity}, entry_price={entry_price}, current_price={current_price}, pnl={pos_pnl}")
                     else:
                         pos['current_price'] = None
                         pos['pnl'] = 0

@@ -27,21 +27,7 @@ class TradingApp {
 
         const absValue = Math.abs(value);
         const formatted = `$${absValue.toFixed(2)}`;
-
-        if (this.isChinese) {
-            // Chinese convention: red for profit (positive), show + sign
-            if (value > 0) {
-                return `+${formatted}`;
-            } else {
-                return `-${formatted}`;
-            }
-        } else {
-            // Default: show sign for positive values
-            if (value > 0) {
-                return `+${formatted}`;
-            }
-            return formatted;
-        }
+        return formatted;
     }
 
     getPnlClass(value, isPnl = false) {
@@ -54,7 +40,7 @@ class TradingApp {
             // In Chinese: positive (profit) should be red
             return this.isChinese ? 'positive' : 'positive';
         } else if (value < 0) {
-            // In Chinese: negative (loss) should not be red
+            // In Chinese: negative (loss) should be green
             return this.isChinese ? 'negative' : 'negative';
         }
         return '';
@@ -368,9 +354,10 @@ class TradingApp {
         document.querySelectorAll('.stat-value').forEach((el, index) => {
             if (stats[index]) {
                 const formattedValue = this.formatPnl(stats[index].value, stats[index].isPnl);
-                console.log(`[updateStats] Setting stat-value[${index}] to: ${formattedValue}`);
+                const pnlClass = this.getPnlClass(stats[index].value, stats[index].isPnl);
+                console.log(`[updateStats] Setting stat-value[${index}] to: ${formattedValue}, class: ${pnlClass}`);
                 el.textContent = formattedValue;
-                el.className = `stat-value ${this.getPnlClass(stats[index].value, stats[index].isPnl)}`;
+                el.className = `stat-value ${pnlClass}`;
             }
         });
 
@@ -712,6 +699,8 @@ class TradingApp {
             if (pos.pnl !== undefined && pos.pnl !== 0) {
                 pnlDisplay = this.formatPnl(pos.pnl, true);
                 pnlClass = this.getPnlClass(pos.pnl, true);
+                // 调试日志
+                console.log(`[Position PnL] ${pos.coin}: value=${pos.pnl}, display=${pnlDisplay}, class=${pnlClass}`);
             }
 
             return `

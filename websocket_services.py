@@ -237,6 +237,9 @@ class PortfolioStreamer:
 
                 logger.debug(f"[WebSocket] Broadcasting portfolio: total_value=${total_portfolio['total_value']:.2f}, "
                            f"unrealized_pnl=${total_portfolio['unrealized_pnl']:.2f}")
+                # 输出每个持仓的PNL值用于调试
+                for pos in total_portfolio.get('positions', []):
+                    logger.debug(f"[WebSocket] 持仓详情: {pos['coin']} {pos['side']} pnl={pos['pnl']:.2f}")
 
                 # Prepare portfolio message
                 portfolio_message = {
