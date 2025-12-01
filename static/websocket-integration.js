@@ -98,10 +98,8 @@
                         console.log('[WebSocket] Updating aggregated view with aggregated data');
                         self.updateStats(portfolioData, true);
                         
-                        // 更新持仓列表
-                        if (portfolioData.positions) {
-                            self.updatePositions(portfolioData.positions, true);
-                        }
+                        // 聚合视图中不更新持仓列表（因为已移除账户价值走势标签页）
+                        console.log('[WebSocket] Skipping positions update in aggregated view');
                     } else {
                         console.log('[WebSocket] Ignoring aggregated data - not in aggregated view');
                     }
@@ -127,22 +125,14 @@
                     }
                 }
                 
-                // 如果是初始数据且UI仍显示加载中，则清除加载状态
-                const positionsBody = document.getElementById('positionsBody');
-                if (positionsBody && positionsBody.querySelector('.empty-state') && 
-                    positionsBody.querySelector('.empty-state').textContent.includes('加载中')) {
-                    if (portfolioData.positions && portfolioData.positions.length > 0) {
-                        if (self.isAggregatedView) {
-                            self.updatePositions(portfolioData.positions, true);
-                        } else {
-                            self.updatePositions(portfolioData.positions, false);
-                        }
-                    } else {
-                        if (self.isAggregatedView) {
-                            positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">聚合视图暂无持仓</td></tr>';
-                        } else {
-                            positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无持仓</td></tr>';
-                        }
+                // 只在数据完整时才更新UI，避免显示中间状态
+                if (!self.isLoadingData && !self.isAggregatedView && portfolioData.positions) {
+                    self.updatePositions(portfolioData.positions, false);
+                } else if (!self.isLoadingData && self.isAggregatedView) {
+                    // 聚合视图中不显示持仓
+                    const positionsBody = document.getElementById('positionsBody');
+                    if (positionsBody) {
+                        positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">聚合视图不显示持仓</td></tr>';
                     }
                 }
                 
@@ -175,15 +165,9 @@
                     console.log('[WebSocket] Aggregated view - trades update received');
                 }
                 
-                // 如果是初始数据且UI仍显示加载中，则清除加载状态
-                const tradesBody = document.getElementById('tradesBody');
-                if (tradesBody && tradesBody.querySelector('.empty-state') && 
-                    tradesBody.querySelector('.empty-state').textContent.includes('加载中')) {
-                    if (tradesData.length > 0) {
-                        self.updateTrades(tradesData);
-                    } else {
-                        tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易记录</td></tr>';
-                    }
+                // 只在数据完整时才更新UI，避免显示中间状态
+                if (!self.isLoadingData && !self.isAggregatedView && tradesData) {
+                    self.updateTrades(tradesData);
                 }
             } else {
                 console.warn('[WebSocket] Invalid trades_update format:', message);
@@ -192,7 +176,9 @@
                 const tradesBody = document.getElementById('tradesBody');
                 if (tradesBody && tradesBody.querySelector('.empty-state') && 
                     tradesBody.querySelector('.empty-state').textContent.includes('加载中')) {
-                    tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易记录</td></tr>';
+                    setTimeout(() => {
+                        tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易记录</td></tr>';
+                    }, 50); // 50ms的延迟足以避免界面闪烁
                 }
             }
         });
@@ -220,15 +206,9 @@
                     console.log('[WebSocket] Aggregated view - conversations update received');
                 }
                 
-                // 如果是初始数据且UI仍显示加载中，则清除加载状态
-                const conversationsBody = document.getElementById('conversationsBody');
-                if (conversationsBody && conversationsBody.querySelector('.empty-state') && 
-                    conversationsBody.querySelector('.empty-state').textContent.includes('加载中')) {
-                    if (conversationsData.length > 0) {
-                        self.updateConversations(conversationsData);
-                    } else {
-                        conversationsBody.innerHTML = '<div class="empty-state">暂无对话记录</div>';
-                    }
+                // 只在数据完整时才更新UI，避免显示中间状态
+                if (!self.isLoadingData && !self.isAggregatedView && conversationsData) {
+                    self.updateConversations(conversationsData);
                 }
             } else {
                 console.warn('[WebSocket] Invalid conversations_update format:', message);
@@ -237,7 +217,9 @@
                 const conversationsBody = document.getElementById('conversationsBody');
                 if (conversationsBody && conversationsBody.querySelector('.empty-state') && 
                     conversationsBody.querySelector('.empty-state').textContent.includes('加载中')) {
-                    conversationsBody.innerHTML = '<div class="empty-state">暂无对话记录</div>';
+                    setTimeout(() => {
+                        conversationsBody.innerHTML = '<div class="empty-state">暂无对话记录</div>';
+                    }, 50); // 50ms的延迟足以避免界面闪烁
                 }
             }
         });
@@ -273,6 +255,9 @@
             if (self.wsClient.reconnectAttempts > 2) {
                 self.showNotification(`WebSocket 连接错误，正在重连... (第${self.wsClient.reconnectAttempts}次)`, 'warning');
             }
+            
+            // 保持界面数据不变，继续显示内存中的数据
+            console.log('[WebSocket] Keeping existing data in UI during connection error');
         };
     };
 
@@ -382,18 +367,27 @@
 
     // Update connection status in UI
     TradingApp.prototype.updateConnectionStatus = function(connected) {
-        const statusElement = document.getElementById('connection-status');
-        if (statusElement) {
-            statusElement.textContent = connected ? 'Connected (WebSocket)' : 'Disconnected';
-            statusElement.className = connected ? 'status-connected' : 'status-disconnected';
-        }
+        // 完全禁用连接状态显示更新
+        /*
+        // 调用主应用中的函数
+        if (typeof window.tradingApp.updateConnectionStatus === 'function') {
+            window.tradingApp.updateConnectionStatus(connected);
+        } else {
+            // 如果主应用中没有这个函数，使用原来的实现
+            const statusElement = document.getElementById('connection-status');
+            if (statusElement) {
+                statusElement.textContent = connected ? 'Connected (WebSocket)' : 'Disconnected';
+                statusElement.className = connected ? 'status-connected' : 'status-disconnected';
+            }
 
-        // Update streaming controls
-        const streamingButton = document.getElementById('start-streaming');
-        if (streamingButton) {
-            streamingButton.disabled = !connected;
-            streamingButton.textContent = connected ? 'Stop Real-time Updates' : 'Start Real-time Updates';
+            // Update streaming controls
+            const streamingButton = document.getElementById('start-streaming');
+            if (streamingButton) {
+                streamingButton.disabled = !connected;
+                streamingButton.textContent = connected ? 'Stop Real-time Updates' : 'Start Real-time Updates';
+            }
         }
+        */
     };
 
     // Update system health in UI

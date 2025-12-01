@@ -193,7 +193,7 @@ class OKXCandleFeed:
         except Exception as e:
             logger.error(f"Message handling error: {e}", exc_info=True)
             
-    async def load_historical_candles(self, limit: int = 100):
+    async def load_historical_candles(self, limit: int = 50):
         """通过HTTP API加载历史K线数据"""
         logger.info(f"Loading historical candles for {len(self.symbols)} symbols (limit={limit})")
         
@@ -275,7 +275,7 @@ class OKXCandleFeed:
             if len(candles) > self.max_candles_per_symbol:
                 candles.pop(0)
                 
-    def get_candles(self, symbol: str, limit: int = 100) -> List[Dict]:
+    def get_candles(self, symbol: str, limit: int = 50) -> List[Dict]:
         """获取K线数据（只返回已确认的K线，排除当前未完成的K线）
         
         用于趋势方向判断，确保使用完整的历史K线
@@ -335,7 +335,7 @@ class OKXCandleFeed:
             logger.debug(f"[{symbol}][{self.timeframe}] 最后一根已确认，返回最新已确认K线")
             return last_candle
     
-    def get_close_prices(self, symbol: str, limit: int = 100) -> List[float]:
+    def get_close_prices(self, symbol: str, limit: int = 50) -> List[float]:
         """获取收盘价列表（用于技术指标计算）"""
         candles = self.get_candles(symbol, limit)
         return [c['close'] for c in candles]

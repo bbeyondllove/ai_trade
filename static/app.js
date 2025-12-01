@@ -1,15 +1,9 @@
 class TradingApp {
     constructor() {
         this.currentModelId = null;
-        this.isAggregatedView = false;
-        this.chart = null;
-        this.refreshIntervals = {
-            market: null,
-            portfolio: null,
-            trades: null
-        };
-        this.isChinese = this.detectLanguage();
-        this.chartResizeHandler = null; // 图表resize事件处理器
+        this.isAggregatedView = true;
+        this.prices = {};
+        this.selectedCoin = 'BTC-USDT';
         this.init();
     }
 
@@ -26,24 +20,26 @@ class TradingApp {
         }
 
         const absValue = Math.abs(value);
-        const formatted = `$${absValue.toFixed(2)}`;
+        const sign = value > 0 ? '+' : '-';
+        const formatted = `${sign}$${absValue.toFixed(2)}`;
         return formatted;
     }
 
     getPnlClass(value, isPnl = false) {
         // Return CSS class based on profit/loss and language preference
-        if (!isPnl || value === 0) {
+        if (!isPnl) {
             return '';
         }
 
         if (value > 0) {
-            // In Chinese: positive (profit) should be red
-            return this.isChinese ? 'positive' : 'positive';
+            // For crypto: positive (profit) should be green
+            return 'positive';
         } else if (value < 0) {
-            // In Chinese: negative (loss) should be green
-            return this.isChinese ? 'negative' : 'negative';
+            // For crypto: negative (loss) should be red
+            return 'negative';
         }
-        return '';
+        // 对于value === 0的情况，返回'neutral'类以确保样式一致性
+        return 'neutral';
     }
 
     init() {
@@ -53,6 +49,28 @@ class TradingApp {
         this.startRefreshCycles();
         // Check for updates after initialization (with delay)
         setTimeout(() => this.checkForUpdates(true), 3000);
+        
+        // 初始化统计数据的CSS类
+        this.initializeStatClasses();
+        
+        // 确保初始状态下聚合视图标签页正确显示
+        if (this.isAggregatedView || !this.currentModelId) {
+            this.hideTabsInAggregatedView();
+        }
+    }
+    
+    initializeStatClasses() {
+        // 为统计值元素初始化CSS类
+        document.querySelectorAll('.stat-value').forEach((el, index) => {
+            // 根据索引确定元素类型
+            if (index === 2 || index === 3) { // 已实现盈亏和未实现盈亏
+                // 初始化为占位符"-"
+                el.className = 'stat-value neutral';
+                el.textContent = '-';
+            } else {
+                el.className = 'stat-value';
+            }
+        });
     }
 
     initEventListeners() {
@@ -156,13 +174,10 @@ class TradingApp {
         // 更新模型列表的活动状态
         this.updateModelListActiveState();
         
-        // 显示聚合视图的加载状态
+        // 显示加载状态
         this.showLoadingStateForAggregated();
         
-        // 显示聚合视图的图表
-        this.showAggregatedChart();
-        
-        // 隐藏单模型视图的标签页
+        // 隐藏所有标签页和标签内容
         this.hideTabsInAggregatedView();
         
         // 重新连接WebSocket流（不带模型过滤器，接收聚合数据）
@@ -176,6 +191,11 @@ class TradingApp {
         
         // 更新价格监视列表
         this.updatePriceWatchlist();
+        
+        // 确保在聚合视图中正确隐藏标签页
+        setTimeout(() => {
+            this.hideTabsInAggregatedView();
+        }, 50);
     }
 
     selectModel(modelId) {
@@ -186,14 +206,11 @@ class TradingApp {
         // 更新模型列表的活动状态
         this.updateModelListActiveState();
         
+        // 显示单个模型视图标签页，隐藏聚合视图标签页
+        this.showTabsInSingleModelView();
+        
         // 显示加载状态
         this.showLoadingState();
-        
-        // 隐藏聚合视图的图表
-        this.hideAggregatedChart();
-        
-        // 显示单模型视图的标签页
-        this.showTabsInSingleModelView();
         
         // 重新连接WebSocket流（带模型过滤器）
         if (typeof this.connectPortfolioStream === 'function') {
@@ -206,10 +223,18 @@ class TradingApp {
         
         // 更新价格监视列表
         this.updatePriceWatchlist();
+        
+        // 确保在单个模型视图中正确显示标签页
+        setTimeout(() => {
+            this.showTabsInSingleModelView();
+        }, 100);
     }
 
     showLoadingState() {
-        // 显示持仓加载状态
+        // 设置加载状态标志
+        this.isLoadingData = true;
+        
+        // 显示持仓加载状态，但添加一个最小显示时间以避免闪烁
         const positionsBody = document.getElementById('positionsBody');
         if (positionsBody) {
             positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">加载中...</td></tr>';
@@ -218,30 +243,23 @@ class TradingApp {
         // 显示交易记录加载状态
         const tradesBody = document.getElementById('tradesBody');
         if (tradesBody) {
+            // 不再检查缓存数据，避免显示中间状态
             tradesBody.innerHTML = '<tr><td colspan="8" class="empty-state">加载中...</td></tr>';
         }
         
         // 显示对话记录加载状态
         const conversationsBody = document.getElementById('conversationsBody');
         if (conversationsBody) {
-            // 检查是否有缓存的对话数据
-            if (this.cachedConversations && this.cachedConversations.length > 0) {
-                // 如果有缓存数据，直接显示
-                this.updateConversations(this.cachedConversations);
-            } else {
-                // 否则显示加载中状态
-                conversationsBody.innerHTML = '<div class="empty-state">加载中...</div>';
-                // 主动请求对话记录数据
-                this.loadConversations();
-            }
+            // 不再检查缓存数据，避免显示中间状态
+            conversationsBody.innerHTML = '<div class="empty-state">加载中...</div>';
         }
     }
     
     showLoadingStateForAggregated() {
-        // 聚合视图不需要显示持仓、交易和对话，只需要清空即可
+        // 聚合视图不需要显示持仓、交易和对话，只需要显示提示信息
         const positionsBody = document.getElementById('positionsBody');
         if (positionsBody) {
-            positionsBody.innerHTML = '';
+            positionsBody.innerHTML = '<tr><td colspan="7" class="empty-state">聚合视图不显示持仓详情</td></tr>';
         }
     }
     
@@ -262,19 +280,17 @@ class TradingApp {
         if (!this.currentModelId) return;
 
         try {
-            const [portfolio, trades, conversations] = await Promise.all([
-                fetch(`/api/models/${this.currentModelId}/portfolio`).then(r => r.json()),
-                fetch(`/api/models/${this.currentModelId}/trades?limit=50`).then(r => r.json()),
-                fetch(`/api/models/${this.currentModelId}/conversations?limit=20`).then(r => r.json())
-            ]);
+            const portfolio = await fetch(`/api/models/${this.currentModelId}/portfolio`).then(r => r.json());
 
             this.updateStats(portfolio.portfolio, false);
-            this.updateSingleModelChart(portfolio.account_value_history, portfolio.portfolio.total_value);
-            this.updatePositions(portfolio.portfolio.positions, false);
-            this.updateTrades(trades);
-            this.updateConversations(conversations);
+            // 不再主动更新持仓，完全依赖WebSocket推送
+            
+            // 清除加载状态标志
+            this.isLoadingData = false;
         } catch (error) {
             console.error('Failed to load model data:', error);
+            // 清除加载状态标志
+            this.isLoadingData = false;
         }
     }
 
@@ -284,7 +300,10 @@ class TradingApp {
         try {
             const response = await fetch(`/api/models/${this.currentModelId}/conversations?limit=20`);
             const conversations = await response.json();
-            this.updateConversations(conversations);
+            // 添加一个小延迟以避免界面闪烁
+            setTimeout(() => {
+                this.updateConversations(conversations);
+            }, 50);
         } catch (error) {
             console.error('Failed to load conversations:', error);
             
@@ -292,8 +311,13 @@ class TradingApp {
             const conversationsBody = document.getElementById('conversationsBody');
             if (conversationsBody && conversationsBody.querySelector('.empty-state') && 
                 conversationsBody.querySelector('.empty-state').textContent.includes('加载中')) {
-                conversationsBody.innerHTML = '<div class="empty-state">加载失败</div>';
+                setTimeout(() => {
+                    conversationsBody.innerHTML = '<div class="empty-state">加载失败</div>';
+                }, 50);
             }
+            
+            // 清除加载状态标志
+            this.isLoadingData = false;
         }
     }
 
@@ -303,7 +327,6 @@ class TradingApp {
             const data = await response.json();
 
             this.updateStats(data.portfolio, true);
-            this.updateMultiModelChart(data.chart_data);
             // Skip positions, trades, and conversations in aggregated view
             this.hideTabsInAggregatedView();
         } catch (error) {
@@ -312,19 +335,41 @@ class TradingApp {
     }
 
     hideTabsInAggregatedView() {
-        // Hide the entire tabbed content section in aggregated view
-        const contentCard = document.querySelector('.content-card .card-tabs').parentElement;
-        if (contentCard) {
-            contentCard.style.display = 'none';
+        // 在聚合视图中隐藏单个模型标签页
+        document.querySelector('.single-model-tabs').style.display = 'none';
+        
+        // 隐藏所有单个模型的标签内容
+        document.querySelectorAll('.tab-content').forEach(content => {
+            content.classList.remove('active');
+        });
+        
+        // 确保聚合视图标签页正确显示（虽然目前是空的）
+        const aggregatedTabs = document.querySelector('.aggregated-view-tabs');
+        if (aggregatedTabs) {
+            aggregatedTabs.style.display = 'none'; // 聚合视图标签页目前是空的，所以隐藏
         }
     }
 
     showTabsInSingleModelView() {
-        // Show the tabbed content section in single model view
-        const contentCard = document.querySelector('.content-card .card-tabs').parentElement;
-        if (contentCard) {
-            contentCard.style.display = 'block';
+        // 在单个模型视图中显示单个模型标签页，隐藏聚合视图标签页
+        document.querySelector('.single-model-tabs').style.display = 'flex';
+        
+        // 隐藏聚合视图标签页
+        const aggregatedTabs = document.querySelector('.aggregated-view-tabs');
+        if (aggregatedTabs) {
+            aggregatedTabs.style.display = 'none';
         }
+        
+        // 显示默认的持仓标签内容
+        document.getElementById('positionsTab').classList.add('active');
+        
+        // 确保持仓标签按钮是激活状态
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        document.querySelector('[data-tab="positions"]').classList.add('active');
+        
+        // 确保其他标签内容区域不显示
+        document.getElementById('tradesTab').classList.remove('active');
+        document.getElementById('conversationsTab').classList.remove('active');
     }
 
     updateStats(portfolio, isAggregated = false) {
@@ -345,19 +390,26 @@ class TradingApp {
         const stats = [
             { value: portfolio.total_value || 0, isPnl: false },
             { value: cashValue, isPnl: false },
-            { value: portfolio.realized_pnl || 0, isPnl: true },
-            { value: portfolio.unrealized_pnl || 0, isPnl: true }
+            { value: portfolio.realized_pnl, isPnl: true },  // 保持undefined/null状态
+            { value: portfolio.unrealized_pnl, isPnl: true }  // 保持undefined/null状态
         ];
 
         console.log('[updateStats] Stats to update:', stats);
 
         document.querySelectorAll('.stat-value').forEach((el, index) => {
             if (stats[index]) {
-                const formattedValue = this.formatPnl(stats[index].value, stats[index].isPnl);
-                const pnlClass = this.getPnlClass(stats[index].value, stats[index].isPnl);
-                console.log(`[updateStats] Setting stat-value[${index}] to: ${formattedValue}, class: ${pnlClass}`);
-                el.textContent = formattedValue;
-                el.className = `stat-value ${pnlClass}`;
+                // 对于盈亏字段，只有在有实际数值时才更新显示
+                if ((index === 2 || index === 3) && (stats[index].value === undefined || stats[index].value === null)) {
+                    // 保持占位符"-"状态
+                    el.textContent = '-';
+                    el.className = 'stat-value neutral';
+                } else {
+                    const formattedValue = this.formatPnl(stats[index].value || 0, stats[index].isPnl);
+                    const pnlClass = this.getPnlClass(stats[index].value || 0, stats[index].isPnl);
+                    console.log(`[updateStats] Setting stat-value[${index}] to: ${formattedValue}, class: ${pnlClass}`);
+                    el.textContent = formattedValue;
+                    el.className = `stat-value ${pnlClass}`;
+                }
             }
         });
 
@@ -375,307 +427,24 @@ class TradingApp {
     }
 
     updateSingleModelChart(history, currentValue) {
-        const chartDom = document.getElementById('accountChart');
-
-        // 只在需要时dispose图表
-        if (this.chart && this.chart._dom !== chartDom) {
-            this.chart.dispose();
-            this.chart = null;
-        }
-        
-        // 复用已存在的图表实例
-        if (!this.chart) {
-            this.chart = echarts.init(chartDom);
-            
-            // 只添加一次resize监听器
-            if (!this.chartResizeHandler) {
-                this.chartResizeHandler = () => {
-                    if (this.chart) {
-                        // ✅ 使用静默模式resize，不触发重排
-                        this.chart.resize({ silent: true });
-                    }
-                };
-                window.addEventListener('resize', this.chartResizeHandler);
-            }
-        }
-
-        // 反转历史数据（从旧到新）
-        const data = history.reverse().map(h => ({
-            time: new Date(h.timestamp.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            }),
-            value: h.total_value
-        }));
-
-        // 添加当前值（如果有）
-        if (currentValue !== undefined && currentValue !== null) {
-            const now = new Date();
-            const currentTime = now.toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-            data.push({
-                time: currentTime,
-                value: currentValue
-            });
-        }
-        
-        // 计算Y轴范围，围绕实际数据
-        const values = data.map(d => d.value);
-        const minValue = Math.min(...values);
-        const maxValue = Math.max(...values);
-        const range = maxValue - minValue;
-        
-        // 智能调整Y轴范围（不强制从0开始）
-        let yMin, yMax;
-        if (range < 1) {
-            // 变化小于$1，使用固定范围让曲线更明显
-            const center = (minValue + maxValue) / 2;
-            yMin = center - 1;
-            yMax = center + 1;
-        } else if (range < 10) {
-            // 变化小于$10
-            const padding = 2;
-            yMin = minValue - padding;
-            yMax = maxValue + padding;
-        } else {
-            // 变化较大，使用10%的padding
-            const padding = range * 0.1;
-            yMin = minValue - padding;
-            yMax = maxValue + padding;
-        }
-
-        const option = {
-            grid: {
-                left: '60',
-                right: '20',
-                bottom: '40',
-                top: '20',
-                containLabel: false
-            },
-            xAxis: {
-                type: 'category',
-                boundaryGap: false,
-                data: data.map(d => d.time),
-                axisLine: { lineStyle: { color: '#e5e6eb' } },
-                axisLabel: { color: '#86909c', fontSize: 11 }
-            },
-            yAxis: {
-                type: 'value',
-                min: yMin,
-                max: yMax,
-                scale: true,
-                axisLine: { lineStyle: { color: '#e5e6eb' } },
-                axisLabel: {
-                    color: '#86909c',
-                    fontSize: 11,
-                    formatter: (value) => `$${value.toLocaleString()}`
-                },
-                splitLine: { lineStyle: { color: '#f2f3f5' } }
-            },
-            series: [{
-                type: 'line',
-                data: data.map(d => d.value),
-                smooth: true,
-                symbol: 'none',
-                lineStyle: { color: '#3370ff', width: 2 },
-                areaStyle: {
-                    color: {
-                        type: 'linear',
-                        x: 0, y: 0, x2: 0, y2: 1,
-                        colorStops: [
-                            { offset: 0, color: 'rgba(51, 112, 255, 0.2)' },
-                            { offset: 1, color: 'rgba(51, 112, 255, 0)' }
-                        ]
-                    }
-                }
-            }],
-            tooltip: {
-                trigger: 'axis',
-                backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                borderColor: '#e5e6eb',
-                borderWidth: 1,
-                textStyle: { color: '#1d2129' },
-                formatter: (params) => {
-                    const value = params[0].value;
-                    return `${params[0].axisValue}<br/>账户价值: $${value.toFixed(2)}`;
-                }
-            }
-        };
-
-        // ✅ 使用静默模式更新，只刷新图表区域，不影响页面其他部分
-        this.chart.setOption(option, {
-            notMerge: false,
-            lazyUpdate: true,
-            silent: true
-        });
-        console.log(`[Chart] Single model chart initialized - Points: ${data.length}, Range: $${minValue.toFixed(2)} - $${maxValue.toFixed(2)}, Y-axis: $${yMin.toFixed(2)} - $${yMax.toFixed(2)}`);
+        // 账户价值走势功能已移除，此函数留空
     }
 
     updateMultiModelChart(chartData) {
-        const chartDom = document.getElementById('accountChart');
-
-        // 只在需要时dispose图表
-        if (this.chart && this.chart._dom !== chartDom) {
-            this.chart.dispose();
-            this.chart = null;
-        }
-        
-        // 复用已存在的图表实例
-        if (!this.chart) {
-            this.chart = echarts.init(chartDom);
-            
-            // 只添加一次resize监听器
-            if (!this.chartResizeHandler) {
-                this.chartResizeHandler = () => {
-                    if (this.chart) {
-                        // ✅ 使用静默模式resize，不触发重排
-                        this.chart.resize({ silent: true });
-                    }
-                };
-                window.addEventListener('resize', this.chartResizeHandler);
-            }
-        }
-
-        if (!chartData || chartData.length === 0) {
-            // Show empty state for multi-model chart
-            this.chart.setOption({
-                title: {
-                    text: '暂无模型数据',
-                    left: 'center',
-                    top: 'center',
-                    textStyle: { color: '#86909c', fontSize: 14 }
-                },
-                xAxis: { show: false },
-                yAxis: { show: false },
-                series: []
-            });
-            return;
-        }
-
-        // Colors for different models
-        const colors = [
-            '#3370ff', '#ff6b35', '#00b96b', '#722ed1', '#fa8c16',
-            '#eb2f96', '#13c2c2', '#faad14', '#f5222d', '#52c41a'
-        ];
-
-        // Prepare time axis - get all timestamps and sort them chronologically
-        const allTimestamps = new Set();
-        chartData.forEach(model => {
-            model.data.forEach(point => {
-                allTimestamps.add(point.timestamp);
-            });
-        });
-
-        // Convert to array and sort by timestamp (not string sort)
-        const timeAxis = Array.from(allTimestamps).sort((a, b) => {
-            const timeA = new Date(a.replace(' ', 'T') + 'Z').getTime();
-            const timeB = new Date(b.replace(' ', 'T') + 'Z').getTime();
-            return timeA - timeB;
-        });
-
-        // Format time labels for display
-        const formattedTimeAxis = timeAxis.map(timestamp => {
-            return new Date(timestamp.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-        });
-
-        // Prepare series data for each model
-        const series = chartData.map((model, index) => {
-            const color = colors[index % colors.length];
-
-            // Create data points aligned with time axis
-            const dataPoints = timeAxis.map(time => {
-                const point = model.data.find(p => p.timestamp === time);
-                return point ? point.value : null;
-            });
-
-            return {
-                name: model.model_name,
-                type: 'line',
-                data: dataPoints,
-                smooth: true,
-                symbol: 'circle',
-                symbolSize: 4,
-                lineStyle: { color: color, width: 2 },
-                itemStyle: { color: color },
-                connectNulls: true  // Connect points even with null values
-            };
-        });
-
-        const option = {
-            title: {
-                text: '模型表现对比',
-                left: 'center',
-                top: 10,
-                textStyle: { color: '#1d2129', fontSize: 16, fontWeight: 'normal' }
-            },
-            grid: {
-                left: '60',
-                right: '20',
-                bottom: '80',
-                top: '50',
-                containLabel: false
-            },
-            xAxis: {
-                type: 'category',
-                boundaryGap: false,
-                data: formattedTimeAxis,
-                axisLine: { lineStyle: { color: '#e5e6eb' } },
-                axisLabel: { color: '#86909c', fontSize: 11, rotate: 45 }
-            },
-            yAxis: {
-                type: 'value',
-                scale: true,
-                axisLine: { lineStyle: { color: '#e5e6eb' } },
-                axisLabel: {
-                    color: '#86909c',
-                    fontSize: 11,
-                    formatter: (value) => `$${value.toLocaleString()}`
-                },
-                splitLine: { lineStyle: { color: '#f2f3f5' } }
-            },
-            legend: {
-                data: chartData.map(model => model.model_name),
-                bottom: 10,
-                itemGap: 20,
-                textStyle: { color: '#1d2129', fontSize: 12 }
-            },
-            series: series,
-            tooltip: {
-                trigger: 'axis',
-                backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                borderColor: '#e5e6eb',
-                borderWidth: 1,
-                textStyle: { color: '#1d2129' },
-                formatter: (params) => {
-                    let result = `${params[0].axisValue}<br/>`;
-                    params.forEach(param => {
-                        if (param.value !== null) {
-                            result += `${param.marker}${param.seriesName}: $${param.value.toFixed(2)}<br/>`;
-                        }
-                    });
-                    return result;
-                }
-            }
-        };
-
-        // ✅ 使用静默模式更新，只刷新图表区域，不影响页面其他部分
-        this.chart.setOption(option, {
-            notMerge: false,
-            lazyUpdate: true,
-            silent: true
-        });
+        // 账户价值走势功能已移除，此函数留空
     }
 
     updatePositions(positions, isAggregated = false) {
+        // 清除加载状态标志
+        this.isLoadingData = false;
+        
         const tbody = document.getElementById('positionsBody');
+        
+        // 如果没有tbody元素，直接返回
+        if (!tbody) {
+            console.warn('[updatePositions] positionsBody element not found');
+            return;
+        }
 
         if (positions.length === 0) {
             if (isAggregated) {
@@ -694,13 +463,12 @@ class TradingApp {
                 ? `$${pos.current_price.toFixed(2)}`
                 : '-';
 
+            // 简化处理：直接显示pnl值，如果不存在则显示'-'
             let pnlDisplay = '-';
             let pnlClass = '';
-            if (pos.pnl !== undefined && pos.pnl !== 0) {
+            if (pos.pnl !== undefined && pos.pnl !== null) {
                 pnlDisplay = this.formatPnl(pos.pnl, true);
                 pnlClass = this.getPnlClass(pos.pnl, true);
-                // 调试日志
-                console.log(`[Position PnL] ${pos.coin}: value=${pos.pnl}, display=${pnlDisplay}, class=${pnlClass}`);
             }
 
             return `
@@ -728,9 +496,21 @@ class TradingApp {
     }
 
     updateTrades(trades) {
+        // 清除加载状态标志
+        this.isLoadingData = false;
+        
+        // 缓存交易数据
+        this.cachedTrades = trades;
+        
         const tbody = document.getElementById('tradesBody');
         console.log('[DEBUG] Update trades called with:', trades.length, 'trades');
         console.log('[DEBUG] Trades data:', trades);
+        
+        // 如果没有tbody元素，直接返回
+        if (!tbody) {
+            console.warn('[updateTrades] tradesBody element not found');
+            return;
+        }
 
         if (trades.length === 0) {
             tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易记录</td></tr>';
@@ -770,7 +550,16 @@ class TradingApp {
     }
 
     updateConversations(conversations) {
+        // 清除加载状态标志
+        this.isLoadingData = false;
+        
         const container = document.getElementById('conversationsBody');
+        
+        // 如果没有container元素，直接返回
+        if (!container) {
+            console.warn('[updateConversations] conversationsBody element not found');
+            return;
+        }
 
         // 缓存对话数据
         this.cachedConversations = conversations;
@@ -839,14 +628,16 @@ class TradingApp {
         const sortedEntries = Object.entries(prices).sort((a, b) => a[0].localeCompare(b[0]));
         
         container.innerHTML = sortedEntries.map(([coin, data]) => {
-            const changeClass = data.change_24h >= 0 ? 'positive' : 'negative';
-            const changeIcon = data.change_24h >= 0 ? '▲' : '▼';
+            const isPositive = data.change_24h >= 0;
+            const changeClass = isPositive ? 'positive' : 'negative';
+            const changeSymbol = isPositive ? '+' : '-';
+            const changeValue = `${changeSymbol}${Math.abs(data.change_24h).toFixed(2)}`;
 
             return `
                 <div class="price-item">
                     <div>
                         <div class="price-symbol">${coin}</div>
-                        <div class="price-change ${changeClass}">${changeIcon} ${Math.abs(data.change_24h).toFixed(2)}%</div>
+                        <div class="price-change ${changeClass}">${changeValue}%</div>
                     </div>
                     <div class="price-value">$${data.price.toFixed(4)}</div>
                 </div>
@@ -855,11 +646,20 @@ class TradingApp {
     }
 
     switchTab(tabName) {
-        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        // 隐藏所有标签内容
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-
+        
+        // 移除所有标签按钮的活动状态
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        
+        // 激活当前标签按钮
         document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
-        document.getElementById(`${tabName}Tab`).classList.add('active');
+        
+        // 显示对应的标签内容
+        const tabElement = document.getElementById(`${tabName}Tab`);
+        if (tabElement) {
+            tabElement.classList.add('active');
+        }
         
         // 当切换到交易记录或AI对话标签页时，重新请求数据
         if (tabName === 'trades' || tabName === 'conversations') {
@@ -1204,8 +1004,20 @@ class TradingApp {
     }
 
     startRefreshCycles() {
-        // WebSocket已经接管实时更新，这里不再需要轮询
-        console.log('[App] Real-time updates handled by WebSocket');
+        // WebSocket已经接管实时更新，这里启动WebSocket连接
+        console.log('[App] Starting WebSocket connection...');
+        if (typeof this.connectWebSocket === 'function') {
+            this.connectWebSocket();
+        }
+        
+        // 启动价格和投资组合数据流
+        if (typeof this.connectPriceStream === 'function') {
+            this.connectPriceStream();
+        }
+        
+        if (typeof this.connectPortfolioStream === 'function') {
+            this.connectPortfolioStream();
+        }
     }
 
     startFallbackRefresh() {
@@ -1235,7 +1047,7 @@ class TradingApp {
         container.innerHTML = priceEntries.map(([coin, data]) => {
             const change24h = data.change_24h || 0;
             const changeClass = change24h >= 0 ? 'positive' : 'negative';
-            const changeIcon = change24h >= 0 ? '▲' : '▼';
+            const changeIcon = change24h >= 0 ? '+' : '-';
             
             console.log(`[App] ${coin}: price=$${data.price}, change=${change24h}%`);
 
@@ -1448,6 +1260,60 @@ class TradingApp {
     hideUpdateIndicator() {
         const indicator = document.getElementById('updateIndicator');
         indicator.style.display = 'none';
+    }
+
+    setupWebSocketHandlers() {
+        if (!this.wsClient) {
+            console.error('[App] WebSocket client not available');
+            return;
+        }
+
+        console.log('[App] Setting up WebSocket handlers');
+
+        // Connection established
+        this.wsClient.on('connection_established', (data) => {
+            console.log('[App] WebSocket connection established');
+            if (typeof this.updateConnectionStatus === 'function') {
+                this.updateConnectionStatus(true);
+            }
+        });
+
+        // Connection lost
+        this.wsClient.on('connection_lost', (data) => {
+            console.log('[App] WebSocket connection lost');
+            if (typeof this.updateConnectionStatus === 'function') {
+                this.updateConnectionStatus(false);
+            }
+            
+            // 保持现有数据不变，不要清空界面
+            console.log('[App] Keeping existing data in UI during connection loss');
+        });
+
+        // Error handling
+        this.wsClient.on('error', (error) => {
+            console.error('[App] WebSocket error:', error);
+            // 保持现有数据不变，不要清空界面
+            console.log('[App] Keeping existing data in UI during error');
+        });
+    }
+    
+    // Update connection status in UI
+    updateConnectionStatus(connected) {
+        // 完全禁用连接状态显示更新
+        /*
+        const statusElement = document.getElementById('connection-status');
+        if (statusElement) {
+            statusElement.textContent = connected ? 'Connected (WebSocket)' : 'Disconnected';
+            statusElement.className = connected ? 'status-connected' : 'status-disconnected';
+        }
+
+        // Update streaming controls
+        const streamingButton = document.getElementById('start-streaming');
+        if (streamingButton) {
+            streamingButton.disabled = !connected;
+            streamingButton.textContent = connected ? 'Stop Real-time Updates' : 'Start Real-time Updates';
+        }
+        */
     }
 }
 

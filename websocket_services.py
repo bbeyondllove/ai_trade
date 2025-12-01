@@ -384,7 +384,8 @@ class TradesStreamer:
                     self.trades_cache[model_id] = trades
                     logger.debug(f"[Trades] Initialized cache for model {model_id} with {len(trades)} trades")
                     
-                    # 不再立即广播初始数据，等待客户端订阅后再发送
+                    # 立即广播初始数据给已连接的客户端
+                    asyncio.create_task(self.broadcast_trades_update(model_id))
         except Exception as e:
             logger.error(f"[Trades] Error initializing cache: {e}")
         
@@ -478,7 +479,8 @@ class ConversationsStreamer:
                     self.conversations_cache[model_id] = conversations
                     logger.debug(f"[Conversations] Initialized cache for model {model_id} with {len(conversations)} conversations")
                     
-                    # 不再立即广播初始数据，等待客户端订阅后再发送
+                    # 立即广播初始数据给已连接的客户端
+                    asyncio.create_task(self.broadcast_conversations_update(model_id))
         except Exception as e:
             logger.error(f"[Conversations] Error initializing cache: {e}")
         

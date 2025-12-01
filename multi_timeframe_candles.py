@@ -156,7 +156,7 @@ class MultiTimeframeCandleManager:
                 available_keys = list(feed.candles.keys())
                 self.logger.debug(f"[{timeframe}] feed.candles中的键: {available_keys}")
         
-            candles = self.get_candles(normalized_symbol, timeframe, limit=100)
+            candles = self.get_candles(normalized_symbol, timeframe, limit=50)
             result[timeframe] = candles
             self.logger.debug(f"[{timeframe}] {symbol} 获取到 {len(candles)} 根K线")
         

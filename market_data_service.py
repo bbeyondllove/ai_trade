@@ -294,7 +294,7 @@ class AsyncMarketDataFetcher:
 
         return {}
 
-    def _fetch_historical_data(self, symbol: str, limit: int = 100) -> List[float]:
+    def _fetch_historical_data(self, symbol: str, limit: int = 50) -> List[float]:
         """获取历史价格数据 - 使用OKX K线数据"""
         try:
             # 先尝试使用缓存 (5分钟缓存)
@@ -302,7 +302,7 @@ class AsyncMarketDataFetcher:
             if cached_data and len(cached_data) >= limit:
                 self.logger.debug(f"Using cached historical data for {symbol}")
                 return cached_data[-limit:]
-
+            
             # 使用OKX K线 API获取历史数据
             okx_symbol = self.okx_symbols.get(symbol)
             if okx_symbol:

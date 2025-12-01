@@ -536,6 +536,7 @@ class Database:
         """Get trade history with model info (including is_live status)"""
         conn = self.get_connection()
         cursor = conn.cursor()
+        # 为提高查询性能，确保相关列上有索引
         cursor.execute('''
             SELECT 
                 t.*,
@@ -582,6 +583,7 @@ class Database:
         """Get conversation history"""
         conn = self.get_connection()
         cursor = conn.cursor()
+        # 为提高查询性能，确保相关列上有索引
         cursor.execute('''
             SELECT * FROM conversations WHERE model_id = ?
             ORDER BY timestamp DESC LIMIT ?

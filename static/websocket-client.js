@@ -367,6 +367,9 @@ class WebSocketClient {
         if (!event.wasClean) {
             this._scheduleReconnect();
         }
+        
+        // 保持缓存数据不变，不要清空
+        console.log('[WebSocketClient] Keeping cached data during connection close');
     }
 
     /**

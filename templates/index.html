@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AITradeGame</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -18,6 +17,8 @@
                     <div class="header-status">
                         <span class="status-dot active"></span>
                         <span class="status-text">运行中</span>
+                        <!-- 隐藏WebSocket连接状态显示 -->
+                        <span id="connection-status" class="status-disconnected" style="display: none;">Disconnected</span>
                     </div>
                     <a href="https://github.com/bbeyondllove/ai_trade" target="_blank" class="header-link" title="访问项目GitHub">
                         <i class="bi bi-github"></i>
@@ -73,7 +74,7 @@
                 <div class="stats-grid" id="statsGrid">
                     <div class="stat-card">
                         <div class="stat-header">
-                            <span class="stat-label">账户总值</span>
+                            <span class="stat-label">账户总价值</span>
                             <i class="bi bi-wallet2 text-primary"></i>
                         </div>
                         <div class="stat-value">$0.00</div>
@@ -90,26 +91,31 @@
                             <span class="stat-label">已实现盈亏</span>
                             <i class="bi bi-graph-up text-info"></i>
                         </div>
-                        <div class="stat-value">$0.00</div>
+                        <div class="stat-value neutral">$0.00</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-header">
                             <span class="stat-label">未实现盈亏</span>
                             <i class="bi bi-graph-down text-warning"></i>
                         </div>
-                        <div class="stat-value">$0.00</div>
+                        <div class="stat-value neutral">$0.00</div>
                     </div>
                 </div>
 
                 <!-- Tabs (持仓区域放在上方，作为主界面) -->
                 <div class="content-card">
-                    <div class="card-tabs">
+                    <!-- 聚合视图标签页 (只显示账户价值走势) -->
+                    <div class="card-tabs aggregated-view-tabs" style="display: none;">
+                    </div>
+                    
+                    <!-- 单个模型视图标签页 (显示持仓、交易记录、AI对话) -->
+                    <div class="card-tabs single-model-tabs">
                         <button class="tab-btn active" data-tab="positions">持仓</button>
                         <button class="tab-btn" data-tab="trades">交易记录</button>
                         <button class="tab-btn" data-tab="conversations">AI对话</button>
                     </div>
-
-                    <div class="tab-content active" id="positionsTab">
+                    
+                    <div class="tab-content" id="positionsTab">
                         <div class="table-container">
                             <table class="data-table">
                                 <thead>

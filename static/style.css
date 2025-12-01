@@ -307,13 +307,13 @@ body {
     margin-top: 2px;
 }
 
-/* In Chinese: positive (up) is red, negative (down) is green */
+/* Price change colors - Crypto convention (green for up, red for down) */
 .price-change.positive {
-    color: var(--danger);
+    color: var(--success);
 }
 
 .price-change.negative {
-    color: var(--success);
+    color: var(--danger);
 }
 
 /* Main Content */
@@ -363,13 +363,17 @@ body {
     color: var(--text-1);
 }
 
-/* In Chinese: positive (profit) is red, negative (loss) is green */
+/* In Chinese: positive (profit) is green, negative (loss) is red for crypto */
 .stat-value.positive {
-    color: var(--danger);
+    color: var(--success);
 }
 
 .stat-value.negative {
-    color: var(--success);
+    color: var(--danger);
+}
+
+.stat-value.neutral {
+    color: var(--text-1);
 }
 
 .text-primary { color: var(--primary); }
@@ -378,14 +382,14 @@ body {
 .text-danger { color: var(--danger); }
 .text-info { color: var(--info); }
 
-/* PnL colors for tables - Chinese convention */
+/* PnL colors for tables - Crypto convention (green for profit, red for loss) */
 .data-table td.positive {
-    color: var(--danger);
+    color: var(--success);
     font-weight: 600;
 }
 
 .data-table td.negative {
-    color: var(--success);
+    color: var(--danger);
     font-weight: 600;
 }
 
@@ -414,15 +418,20 @@ body {
     overflow: hidden;
 }
 
-#accountChart {
-    width: 100% !important;
-    height: 300px !important;
-}
+
 
 /* Tabs */
 .card-tabs {
     display: flex;
     border-bottom: 1px solid var(--border-1);
+}
+
+.aggregated-view-tabs {
+    display: none;
+}
+
+.single-model-tabs {
+    display: flex;
 }
 
 .tab-btn {
@@ -1123,3 +1132,18 @@ body {
     margin-left: 8px;
 }
 
+#connection-status {
+    margin-left: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.status-connected {
+    color: #28a745;
+}
+
+.status-disconnected {
+    color: #dc3545;
+}
