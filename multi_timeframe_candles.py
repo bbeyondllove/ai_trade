@@ -30,7 +30,12 @@ class MultiTimeframeCandleManager:
         self.timeframe_roles = config_manager.multi_timeframe.timeframe_roles
         self.max_candles_per_symbol = config_manager.multi_timeframe.max_candles_per_symbol
         
-        self.logger.info(f"📊 多周期配置: {', '.join([f'{tf}({self.timeframe_roles.get(tf, '')}:{self.timeframe_weights.get(tf, 0)}%)' for tf in self.timeframes])}")
+        config_parts = []
+        for tf in self.timeframes:
+            role = self.timeframe_roles.get(tf, '')
+            weight = self.timeframe_weights.get(tf, 0)
+            config_parts.append(f"{tf}({role}:{weight}%)")
+        self.logger.info(f"📊 多周期配置: {', '.join(config_parts)}")
         
         self.candle_feeds: Dict[str, OKXCandleFeed] = {}
         self.candle_tasks: Dict[str, asyncio.Task] = {}

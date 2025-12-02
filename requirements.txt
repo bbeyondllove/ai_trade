@@ -8,7 +8,7 @@ python-dotenv>=1.0.0
 websockets==15.0.1
 
 # OKX SDK dependencies
-httpx[http2]>=0.24.0
+httpx[http2]==0.28.1
 loguru>=0.7.0
 importlib-metadata>=6.0.0
 
